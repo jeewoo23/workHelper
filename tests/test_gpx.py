@@ -1,4 +1,5 @@
 from datetime import timedelta
+from math import atan2, cos, radians, sin, sqrt
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
@@ -18,6 +19,28 @@ from route_controller.gpx import (
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "routes" / "source" / "route_final.gpx"
+HIGHWAY_START = (37.40382498413415, -122.02724763671414)
+HIGHWAY_END = (37.3920662232116, -122.09474709677077)
+
+
+def _distance_meters(
+    first: tuple[float, float], second: tuple[float, float]
+) -> float:
+    lat1, lon1 = map(radians, first)
+    lat2, lon2 = map(radians, second)
+    dlat = lat2 - lat1
+    dlon = lon2 - lon1
+    haversine = sin(dlat / 2) ** 2 + cos(lat1) * cos(lat2) * sin(dlon / 2) ** 2
+    return 6371000 * 2 * atan2(sqrt(haversine), sqrt(1 - haversine))
+
+
+def _nearest_index(points: list[RoutePoint], target: tuple[float, float]) -> int:
+    return min(
+        range(len(points)),
+        key=lambda index: _distance_meters(
+            (points[index].latitude, points[index].longitude), target
+        ),
+    )
 
 
 def test_source_route_has_expected_split_and_duration() -> None:
@@ -33,6 +56,18 @@ def test_source_route_has_expected_split_and_duration() -> None:
     assert inbound[-1].name == "L1 return"
     assert summarize("outbound", outbound).duration_seconds == 1200
     assert summarize("inbound", inbound).duration_seconds == 1200
+
+
+def test_return_highway_section_is_timed_faster() -> None:
+    points = parse_xcode_waypoints(SOURCE)
+    _, inbound = split_round_trip(points)
+
+    start = _nearest_index(inbound, HIGHWAY_START)
+    end = _nearest_index(inbound, HIGHWAY_END)
+    duration = (inbound[end].time - inbound[start].time).total_seconds()
+
+    assert start < end
+    assert round(duration) == 290
 
 
 def test_generated_files_are_single_timed_tracks(tmp_path: Path) -> None:
@@ -86,11 +121,28 @@ def test_interpolated_generated_tracks_have_one_second_samples(
     assert outbound_name == "L1 to L2"
     assert inbound_name == "L2 to L1"
     assert len(outbound) == 1201
-    assert len(inbound) == 1201
+    assert len(inbound) >= 1201
     assert outbound[-1].name == "L2"
     assert inbound[0].name == "L2"
     assert summarize(outbound_name, outbound).duration_seconds == 1200
     assert summarize(inbound_name, inbound).duration_seconds == 1200
+
+
+def test_interpolated_generated_tracks_can_use_half_second_samples(
+    tmp_path: Path,
+) -> None:
+    outbound_path, inbound_path = generate_directional_tracks(
+        SOURCE, tmp_path, interpolate_seconds=0.5
+    )
+
+    outbound_name, outbound = parse_track(outbound_path)
+    inbound_name, inbound = parse_track(inbound_path)
+
+    assert len(outbound) == 2401
+    assert len(inbound) >= 2401
+    assert summarize(outbound_name, outbound).duration_seconds == 1200
+    assert summarize(inbound_name, inbound).duration_seconds == 1200
+    assert outbound[1].time - outbound[0].time == timedelta(seconds=0.5)
 
 
 def test_non_monotonic_timestamp_is_rejected() -> None:

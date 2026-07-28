@@ -41,7 +41,7 @@ def _parser() -> argparse.ArgumentParser:
     convert.add_argument("--split-name", default="L2")
     convert.add_argument(
         "--interpolate-seconds",
-        type=int,
+        type=float,
         help="Insert linear track points at this second interval for smoother playback",
     )
 

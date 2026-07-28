@@ -154,7 +154,7 @@ def split_round_trip(
 
 
 def interpolate_points(
-    points: Sequence[RoutePoint], interval_seconds: int
+    points: Sequence[RoutePoint], interval_seconds: float
 ) -> list[RoutePoint]:
     validate_points(points)
     if interval_seconds <= 0:
@@ -192,7 +192,8 @@ def interpolate_points(
 
 
 def _format_time(value: datetime) -> str:
-    utc_text = value.isoformat(timespec="seconds")
+    timespec = "milliseconds" if value.microsecond else "seconds"
+    utc_text = value.isoformat(timespec=timespec)
     return utc_text.replace("+00:00", "Z")
 
 
@@ -241,7 +242,7 @@ def generate_directional_tracks(
     source: Path,
     output_directory: Path,
     split_name: str = "L2",
-    interpolate_seconds: Optional[int] = None,
+    interpolate_seconds: Optional[float] = None,
 ) -> tuple[Path, Path]:
     points = parse_xcode_waypoints(source)
     outbound, inbound = split_round_trip(points, split_name=split_name)
