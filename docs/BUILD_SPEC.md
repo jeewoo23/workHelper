@@ -95,7 +95,7 @@ The source GPX is valid XML and contains:
 - **L1:** first waypoint at `2026-01-01T12:00:00Z`
 - **L2:** midpoint waypoint at `2026-01-01T12:20:00Z`
 - **L1 return:** final waypoint at `2026-01-01T12:40:00Z`
-- **L1 → L2:** 47 points over exactly 20 minutes
+- **L1 → L2:** 48 points over exactly 20 minutes
 - **L2 → L1:** 47 points over exactly 20 minutes
 - The L2 point is included in both directional files.
 
@@ -803,7 +803,8 @@ The MVP is complete when:
 
 - The intended physical iPhone is shown in the UI.
 - Each direction starts from one clearly labeled button.
-- Both directional GPX track files contain 47 points and last 20 minutes.
+- L1 → L2 contains 48 points and lasts 20 minutes.
+- L2 → L1 contains 47 points and lasts 20 minutes.
 - Starting a route updates the physical phone's simulated position.
 - Progress follows the GPX timestamps.
 - Pause and resume work without jumping to an incorrect point.
