@@ -98,6 +98,7 @@ The source GPX is valid XML and contains:
 - **L1 → L2 source:** 48 points over exactly 20 minutes
 - **L2 → L1 source:** 1,070 points over exactly 20 minutes
 - **Playback tracks:** interpolated to 0.5-second samples for smoother 20-minute playback
+- **Current playback counts:** 2,416 outbound points and 2,441 return points
 - The L2 point is included in both directional files.
 
 The original Xcode route uses:

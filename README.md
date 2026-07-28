@@ -85,7 +85,7 @@ uv run route-controller inspect routes/tracks/route_L2_to_L1.track.gpx
 
 The source route contains 48 outbound points and 1,070 return points. The checked-in
 playback tracks are interpolated at half-second intervals, so the outbound track
-should report 2,401 points and the return track should report at least 2,401
+should report 2,416 points and the return track should report 2,441
 points over 1,200 seconds.
 
 ## Playback safety

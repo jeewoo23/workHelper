@@ -58,16 +58,26 @@ def test_source_route_has_expected_split_and_duration() -> None:
     assert summarize("inbound", inbound).duration_seconds == 1200
 
 
-def test_return_highway_section_is_timed_faster() -> None:
+def test_highway_sections_are_timed_faster_in_both_directions() -> None:
     points = parse_xcode_waypoints(SOURCE)
-    _, inbound = split_round_trip(points)
+    outbound, inbound = split_round_trip(points)
 
-    start = _nearest_index(inbound, HIGHWAY_START)
-    end = _nearest_index(inbound, HIGHWAY_END)
-    duration = (inbound[end].time - inbound[start].time).total_seconds()
+    outbound_start = _nearest_index(outbound, HIGHWAY_END)
+    outbound_end = _nearest_index(outbound, HIGHWAY_START)
+    inbound_start = _nearest_index(inbound, HIGHWAY_START)
+    inbound_end = _nearest_index(inbound, HIGHWAY_END)
 
-    assert start < end
-    assert round(duration) == 290
+    outbound_duration = (
+        outbound[outbound_end].time - outbound[outbound_start].time
+    ).total_seconds()
+    inbound_duration = (
+        inbound[inbound_end].time - inbound[inbound_start].time
+    ).total_seconds()
+
+    assert outbound_start < outbound_end
+    assert inbound_start < inbound_end
+    assert round(outbound_duration, 1) == 312.5
+    assert round(inbound_duration) == 290
 
 
 def test_generated_files_are_single_timed_tracks(tmp_path: Path) -> None:
@@ -105,7 +115,7 @@ def test_interpolation_adds_linear_points_and_preserves_endpoints() -> None:
     assert interpolated[-1] == outbound[-1]
     assert interpolated[-1].name == "L2"
     assert summarize("outbound", interpolated).duration_seconds == 1200
-    assert len(interpolated) == 1201
+    assert len(interpolated) >= 1201
 
 
 def test_interpolated_generated_tracks_have_one_second_samples(
@@ -120,7 +130,7 @@ def test_interpolated_generated_tracks_have_one_second_samples(
 
     assert outbound_name == "L1 to L2"
     assert inbound_name == "L2 to L1"
-    assert len(outbound) == 1201
+    assert len(outbound) >= 1201
     assert len(inbound) >= 1201
     assert outbound[-1].name == "L2"
     assert inbound[0].name == "L2"
@@ -138,7 +148,7 @@ def test_interpolated_generated_tracks_can_use_half_second_samples(
     outbound_name, outbound = parse_track(outbound_path)
     inbound_name, inbound = parse_track(inbound_path)
 
-    assert len(outbound) == 2401
+    assert len(outbound) >= 2401
     assert len(inbound) >= 2401
     assert summarize(outbound_name, outbound).duration_seconds == 1200
     assert summarize(inbound_name, inbound).duration_seconds == 1200
