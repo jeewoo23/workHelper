@@ -83,8 +83,9 @@ uv run route-controller inspect routes/tracks/route_L1_to_L2.track.gpx
 uv run route-controller inspect routes/tracks/route_L2_to_L1.track.gpx
 ```
 
-The outbound route should report 48 points and 1,200 seconds. The return route
-should report 47 points and 1,200 seconds.
+The source route contains 48 outbound points and 47 return points. The checked-in
+playback tracks are interpolated at one-second intervals, so each track should
+report 1,201 points and 1,200 seconds.
 
 ## Playback safety
 

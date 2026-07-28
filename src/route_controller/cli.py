@@ -39,6 +39,11 @@ def _parser() -> argparse.ArgumentParser:
     convert.add_argument("source", type=Path)
     convert.add_argument("output_directory", type=Path)
     convert.add_argument("--split-name", default="L2")
+    convert.add_argument(
+        "--interpolate-seconds",
+        type=int,
+        help="Insert linear track points at this second interval for smoother playback",
+    )
 
     inspect = subparsers.add_parser("inspect", help="Validate and summarize a track")
     inspect.add_argument("route", type=Path)
@@ -123,6 +128,7 @@ def _run(arguments: argparse.Namespace) -> int:
             arguments.source,
             arguments.output_directory,
             split_name=arguments.split_name,
+            interpolate_seconds=arguments.interpolate_seconds,
         )
         for route in generated:
             print(route)

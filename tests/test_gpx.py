@@ -8,6 +8,7 @@ from route_controller.gpx import (
     GpxValidationError,
     RoutePoint,
     generate_directional_tracks,
+    interpolate_points,
     parse_track,
     parse_xcode_waypoints,
     split_round_trip,
@@ -57,6 +58,39 @@ def test_generated_files_are_single_timed_tracks(tmp_path: Path) -> None:
         name, points = parse_track(path)
         assert name == expected_name
         assert summarize(name, points).duration_seconds == 1200
+
+
+def test_interpolation_adds_linear_points_and_preserves_endpoints() -> None:
+    points = parse_xcode_waypoints(SOURCE)
+    outbound, _ = split_round_trip(points)
+
+    interpolated = interpolate_points(outbound, 1)
+
+    assert interpolated[0] == outbound[0]
+    assert interpolated[-1] == outbound[-1]
+    assert interpolated[-1].name == "L2"
+    assert summarize("outbound", interpolated).duration_seconds == 1200
+    assert len(interpolated) == 1201
+
+
+def test_interpolated_generated_tracks_have_one_second_samples(
+    tmp_path: Path,
+) -> None:
+    outbound_path, inbound_path = generate_directional_tracks(
+        SOURCE, tmp_path, interpolate_seconds=1
+    )
+
+    outbound_name, outbound = parse_track(outbound_path)
+    inbound_name, inbound = parse_track(inbound_path)
+
+    assert outbound_name == "L1 to L2"
+    assert inbound_name == "L2 to L1"
+    assert len(outbound) == 1201
+    assert len(inbound) == 1201
+    assert outbound[-1].name == "L2"
+    assert inbound[0].name == "L2"
+    assert summarize(outbound_name, outbound).duration_seconds == 1200
+    assert summarize(inbound_name, inbound).duration_seconds == 1200
 
 
 def test_non_monotonic_timestamp_is_rejected() -> None:

@@ -95,8 +95,9 @@ The source GPX is valid XML and contains:
 - **L1:** first waypoint at `2026-01-01T12:00:00Z`
 - **L2:** midpoint waypoint at `2026-01-01T12:20:00Z`
 - **L1 return:** final waypoint at `2026-01-01T12:40:00Z`
-- **L1 → L2:** 48 points over exactly 20 minutes
-- **L2 → L1:** 47 points over exactly 20 minutes
+- **L1 → L2 source:** 48 points over exactly 20 minutes
+- **L2 → L1 source:** 47 points over exactly 20 minutes
+- **Playback tracks:** interpolated to 1-second samples, 1,201 points per 20-minute leg
 - The L2 point is included in both directional files.
 
 The original Xcode route uses:
@@ -244,6 +245,7 @@ The current [`pymobiledevice3` GPX playback implementation](https://github.com/d
 7. Validate generated XML.
 8. Validate timestamps are monotonic.
 9. Confirm each directional duration is exactly 1,200 seconds.
+10. Interpolate playback tracks to one-second samples for smooth device movement.
 
 ### Future generated-route timing
 
@@ -803,8 +805,9 @@ The MVP is complete when:
 
 - The intended physical iPhone is shown in the UI.
 - Each direction starts from one clearly labeled button.
-- L1 → L2 contains 48 points and lasts 20 minutes.
-- L2 → L1 contains 47 points and lasts 20 minutes.
+- L1 → L2 source contains 48 points and lasts 20 minutes.
+- L2 → L1 source contains 47 points and lasts 20 minutes.
+- Playback GPX files contain 1-second interpolated samples and last 20 minutes.
 - Starting a route updates the physical phone's simulated position.
 - Progress follows the GPX timestamps.
 - Pause and resume work without jumping to an incorrect point.

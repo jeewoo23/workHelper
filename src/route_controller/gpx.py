@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional, Sequence
 from xml.etree import ElementTree as ET
@@ -153,6 +153,44 @@ def split_round_trip(
     return outbound, inbound
 
 
+def interpolate_points(
+    points: Sequence[RoutePoint], interval_seconds: int
+) -> list[RoutePoint]:
+    validate_points(points)
+    if interval_seconds <= 0:
+        raise GpxValidationError(
+            f"Interpolation interval must be positive: {interval_seconds}"
+        )
+
+    interpolated = [points[0]]
+    interval = timedelta(seconds=interval_seconds)
+    for start, end in zip(points, points[1:]):
+        segment_duration = end.time - start.time
+        if segment_duration.total_seconds() <= 0:
+            if end.time == start.time:
+                interpolated.append(end)
+                continue
+            raise GpxValidationError("Route segment has a negative duration")
+
+        cursor = start.time + interval
+        while cursor < end.time:
+            fraction = (cursor - start.time).total_seconds() / segment_duration.total_seconds()
+            interpolated.append(
+                RoutePoint(
+                    latitude=start.latitude
+                    + ((end.latitude - start.latitude) * fraction),
+                    longitude=start.longitude
+                    + ((end.longitude - start.longitude) * fraction),
+                    time=cursor,
+                )
+            )
+            cursor += interval
+        interpolated.append(end)
+
+    validate_points(interpolated)
+    return interpolated
+
+
 def _format_time(value: datetime) -> str:
     utc_text = value.isoformat(timespec="seconds")
     return utc_text.replace("+00:00", "Z")
@@ -200,10 +238,16 @@ def summarize(name: str, points: Sequence[RoutePoint]) -> RouteSummary:
 
 
 def generate_directional_tracks(
-    source: Path, output_directory: Path, split_name: str = "L2"
+    source: Path,
+    output_directory: Path,
+    split_name: str = "L2",
+    interpolate_seconds: Optional[int] = None,
 ) -> tuple[Path, Path]:
     points = parse_xcode_waypoints(source)
     outbound, inbound = split_round_trip(points, split_name=split_name)
+    if interpolate_seconds is not None:
+        outbound = interpolate_points(outbound, interpolate_seconds)
+        inbound = interpolate_points(inbound, interpolate_seconds)
     outbound_path = output_directory / "route_L1_to_L2.track.gpx"
     inbound_path = output_directory / "route_L2_to_L1.track.gpx"
     write_track(outbound_path, "L1 to L2", outbound)
