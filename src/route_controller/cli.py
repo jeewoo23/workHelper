@@ -51,11 +51,21 @@ def _parser() -> argparse.ArgumentParser:
     set_location.add_argument("longitude", type=float)
     set_location.add_argument("--execute", action="store_true")
     set_location.add_argument("--executable")
+    set_location.add_argument(
+        "--userspace",
+        action="store_true",
+        help="Use pymobiledevice3's no-root iOS 17+ userspace tunnel",
+    )
 
     play = subparsers.add_parser("play", help="Play a validated track")
     play.add_argument("route", type=Path)
     play.add_argument("--execute", action="store_true")
     play.add_argument("--executable")
+    play.add_argument(
+        "--userspace",
+        action="store_true",
+        help="Use pymobiledevice3's no-root iOS 17+ userspace tunnel",
+    )
     play.add_argument(
         "--no-clear-on-interrupt",
         action="store_true",
@@ -65,11 +75,25 @@ def _parser() -> argparse.ArgumentParser:
     clear = subparsers.add_parser("clear", help="Restore the phone's real location")
     clear.add_argument("--execute", action="store_true")
     clear.add_argument("--executable")
+    clear.add_argument(
+        "--userspace",
+        action="store_true",
+        help="Use pymobiledevice3's no-root iOS 17+ userspace tunnel",
+    )
     return parser
 
 
 def _print_command(arguments: Sequence[str]) -> None:
     print(" ".join(shlex.quote(argument) for argument in arguments))
+
+
+def _print_executed_result(action: str, returncode: Optional[int]) -> int:
+    code = returncode or 0
+    if code == 0:
+        print(f"{action}: command completed successfully")
+    else:
+        print(f"{action}: command failed with exit code {code}", file=sys.stderr)
+    return code
 
 
 def _run(arguments: argparse.Namespace) -> int:
@@ -129,13 +153,14 @@ def _run(arguments: argparse.Namespace) -> int:
             arguments.route,
             executable=arguments.executable,
             execute=arguments.execute,
+            userspace=arguments.userspace,
             clear_on_interrupt=not arguments.no_clear_on_interrupt,
         )
         if not result.executed:
             print("Dry run; add --execute to control the connected phone:")
             _print_command(result.arguments)
             return 0
-        return result.returncode or 0
+        return _print_executed_result("Route playback", result.returncode)
 
     if arguments.command == "set":
         result = set_route_location(
@@ -143,23 +168,25 @@ def _run(arguments: argparse.Namespace) -> int:
             arguments.longitude,
             executable=arguments.executable,
             execute=arguments.execute,
+            userspace=arguments.userspace,
         )
         if not result.executed:
             print("Dry run; add --execute to set the connected phone's location:")
             _print_command(result.arguments)
             return 0
-        return result.returncode or 0
+        return _print_executed_result("Static location set", result.returncode)
 
     if arguments.command == "clear":
         result = clear_route_location(
             executable=arguments.executable,
             execute=arguments.execute,
+            userspace=arguments.userspace,
         )
         if not result.executed:
             print("Dry run; add --execute to restore the connected phone's real location:")
             _print_command(result.arguments)
             return 0
-        return result.returncode or 0
+        return _print_executed_result("Location clear", result.returncode)
 
     raise AssertionError(f"Unhandled command: {arguments.command}")
 

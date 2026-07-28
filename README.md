@@ -68,6 +68,14 @@ uv run route-controller set 37.3835546 -122.1371287 --execute
 uv run route-controller clear --execute
 ```
 
+If `pymobiledevice3` reports that it is trying `tunneld` on an iOS 17+
+device, retry with the no-root userspace tunnel:
+
+```bash
+uv run route-controller set 37.3835546 -122.1371287 --userspace --execute
+uv run route-controller clear --userspace --execute
+```
+
 ## Inspect the generated routes
 
 ```bash
@@ -90,6 +98,13 @@ run playback:
 
 ```bash
 uv run route-controller play routes/tracks/route_L1_to_L2.track.gpx --execute
+```
+
+If the static-location proof needed `--userspace`, use it for route playback
+too:
+
+```bash
+uv run route-controller play routes/tracks/route_L1_to_L2.track.gpx --userspace --execute
 ```
 
 Restore the phone's real location:
