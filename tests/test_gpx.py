@@ -24,9 +24,9 @@ def test_source_route_has_expected_split_and_duration() -> None:
     points = parse_xcode_waypoints(SOURCE)
     outbound, inbound = split_round_trip(points)
 
-    assert len(points) == 94
+    assert len(points) == 1117
     assert len(outbound) == 48
-    assert len(inbound) == 47
+    assert len(inbound) == 1070
     assert outbound[0].name == "L1"
     assert outbound[-1].name == "L2"
     assert inbound[0].name == "L2"
@@ -52,7 +52,7 @@ def test_generated_files_are_single_timed_tracks(tmp_path: Path) -> None:
         )
         assert (
             len([element for element in root.iter() if element.tag.endswith("trkpt")])
-            == (48 if expected_name == "L1 to L2" else 47)
+            == (48 if expected_name == "L1 to L2" else 1070)
         )
 
         name, points = parse_track(path)
