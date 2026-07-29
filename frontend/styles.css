@@ -322,6 +322,11 @@ h1, h2, p { margin-top: 0; }
   z-index: 3;
   top: 59px;
   right: 12px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  justify-content: flex-end;
+  max-width: calc(100% - 24px);
 }
 .map-button {
   display: flex;
@@ -338,6 +343,17 @@ h1, h2, p { margin-top: 0; }
 }
 .map-button:hover { color: white; border-color: var(--blue); }
 .map-button span { color: var(--blue); font-size: 13px; }
+.map-button.selected {
+  color: #dff4ff;
+  background: rgba(67, 162, 216, .17);
+  border-color: var(--blue);
+}
+.map-button.selected span { color: #78c8ef; }
+.map-button.pending {
+  color: #ffe09b;
+  border-color: rgba(242, 193, 78, .5);
+}
+.map-button.pending span { color: #f2c14e; }
 .map-legend {
   position: absolute;
   z-index: 3;

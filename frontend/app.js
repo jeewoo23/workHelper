@@ -26,8 +26,10 @@ const state = {
     status: "idle",
     coords: null,
     error: "",
-    watchId: null
+    watchId: null,
+    pendingPan: false
   },
+  trackSimulatedLocation: false,
   viewer: null,
   mapEntities: {}
 };
@@ -214,6 +216,8 @@ function renderShell() {
               <div id="cesiumMap"></div>
               <div class="map-actions">
                 <button class="map-button" data-action="recenter" aria-label="Recenter route"><span aria-hidden="true">⌖</span> RECENTER</button>
+                <button class="map-button" data-action="track-simulated" aria-pressed="false" aria-label="Track simulated location"><span aria-hidden="true">◎</span><span data-live="track-label">TRACK SIM</span></button>
+                <button class="map-button" data-action="pan-physical" aria-label="Pan to Mac physical location"><span aria-hidden="true">◆</span> REAL LOCATION</button>
               </div>
               <div class="map-legend">
                 <span><i class="legend-dot current"></i>Simulated</span>
@@ -307,7 +311,13 @@ function bindControls() {
   });
 
   document.querySelector('[data-action="clear"]').addEventListener("click", clearDeviceLocation);
-  document.querySelector('[data-action="recenter"]').addEventListener("click", () => frameRoute(true));
+  document.querySelector('[data-action="recenter"]').addEventListener("click", () => {
+    state.trackSimulatedLocation = false;
+    frameRoute(true);
+    updateLiveState();
+  });
+  document.querySelector('[data-action="track-simulated"]').addEventListener("click", toggleTrackSimulatedLocation);
+  document.querySelector('[data-action="pan-physical"]').addEventListener("click", panToPhysicalLocation);
   document.querySelector('[data-action="physical-location"]').addEventListener("click", togglePhysicalLocationMarker);
   const remainingInput = document.querySelector('[data-live-input="remaining-minutes"]');
   remainingInput.addEventListener("focus", () => {
@@ -674,6 +684,33 @@ function syncPhysicalLocationMarker() {
   viewer.scene.requestRender();
 }
 
+function toggleTrackSimulatedLocation() {
+  state.trackSimulatedLocation = !state.trackSimulatedLocation;
+  if (state.trackSimulatedLocation) {
+    panToPoint(interpolatedPoint(), true);
+  }
+  updateLiveState();
+}
+
+function panToPhysicalLocation() {
+  state.trackSimulatedLocation = false;
+  if (state.physicalLocation.coords) {
+    panToPoint({
+      lat: state.physicalLocation.coords.lat,
+      lon: state.physicalLocation.coords.lon
+    }, true);
+    updateLiveState();
+    return;
+  }
+
+  state.physicalLocation.pendingPan = true;
+  if (state.physicalLocation.watchId === null) {
+    startPhysicalLocationWatch();
+  } else {
+    updateLiveState();
+  }
+}
+
 function togglePhysicalLocationMarker() {
   if (state.physicalLocation.watchId !== null) {
     navigator.geolocation.clearWatch(state.physicalLocation.watchId);
@@ -681,14 +718,20 @@ function togglePhysicalLocationMarker() {
     state.physicalLocation.status = "idle";
     state.physicalLocation.coords = null;
     state.physicalLocation.error = "";
+    state.physicalLocation.pendingPan = false;
     syncPhysicalLocationMarker();
     updateLiveState();
     return;
   }
 
+  startPhysicalLocationWatch();
+}
+
+function startPhysicalLocationWatch() {
   if (!navigator.geolocation) {
     state.physicalLocation.status = "error";
     state.physicalLocation.error = "Browser Location Services are unavailable.";
+    state.physicalLocation.pendingPan = false;
     updateLiveState();
     return;
   }
@@ -707,11 +750,16 @@ function togglePhysicalLocationMarker() {
       };
       state.physicalLocation.error = "";
       syncPhysicalLocationMarker();
+      if (state.physicalLocation.pendingPan) {
+        state.physicalLocation.pendingPan = false;
+        panToPoint({ lat: position.coords.latitude, lon: position.coords.longitude }, true);
+      }
       updateLiveState();
     },
     error => {
       state.physicalLocation.status = "error";
       state.physicalLocation.error = locationErrorMessage(error);
+      state.physicalLocation.pendingPan = false;
       syncPhysicalLocationMarker();
       updateLiveState();
     },
@@ -775,6 +823,20 @@ function frameRoute(animated) {
 
   if (animated) {
     viewer.camera.flyTo({ destination, duration: 0.7 });
+  } else {
+    viewer.camera.setView({ destination });
+  }
+  viewer.scene.requestRender();
+}
+
+function panToPoint(point, animated) {
+  const viewer = state.viewer;
+  if (!viewer || viewer.isDestroyed() || !Number.isFinite(point.lat) || !Number.isFinite(point.lon)) return;
+
+  const height = Math.max(viewer.camera.positionCartographic?.height || 14000, 800);
+  const destination = Cesium.Cartesian3.fromDegrees(point.lon, point.lat, height);
+  if (animated) {
+    viewer.camera.flyTo({ destination, duration: 0.55 });
   } else {
     viewer.camera.setView({ destination });
   }
@@ -849,6 +911,7 @@ function updateLiveState() {
       : state.physicalLocation.coords
         ? `Browser Location Services · accuracy ±${Math.round(state.physicalLocation.coords.accuracy)}m`
         : "Uses browser Location Services on this Mac, not simulated iPhone GPS.");
+  setText("track-label", state.trackSimulatedLocation ? "TRACKING SIM" : "TRACK SIM");
   setText("control-state", state.backend.available
     ? backendPlayback.state === "playing"
       ? "DEVICE"
@@ -888,6 +951,15 @@ function updateLiveState() {
   if (toggleButton) {
     toggleButton.classList.toggle("preview-warning", previewWithoutPhone && !deviceOnline);
   }
+  const trackButton = document.querySelector('[data-action="track-simulated"]');
+  if (trackButton) {
+    trackButton.classList.toggle("selected", state.trackSimulatedLocation);
+    trackButton.setAttribute("aria-pressed", String(state.trackSimulatedLocation));
+  }
+  const physicalButton = document.querySelector('[data-action="pan-physical"]');
+  if (physicalButton) {
+    physicalButton.classList.toggle("pending", state.physicalLocation.pendingPan || state.physicalLocation.status === "requesting");
+  }
   document.querySelectorAll("[data-direction]").forEach(button =>
     button.classList.toggle("selected", button.dataset.direction === state.direction)
   );
@@ -908,6 +980,9 @@ function updateLiveState() {
   if (viewer && !viewer.isDestroyed() && state.mapEntities.current) {
     state.mapEntities.current.position = Cesium.Cartesian3.fromDegrees(current.lon, current.lat);
     state.mapEntities.progress.polyline.positions = degreesArray(completedRoutePoints());
+    if (state.trackSimulatedLocation) {
+      panToPoint(current, false);
+    }
     viewer.scene.requestRender();
   }
 }
