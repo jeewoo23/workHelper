@@ -10,6 +10,7 @@ const state = {
   lastUiUpdate: null,
   backend: {
     available: false,
+    device: null,
     playback: { state: "idle" },
     error: "",
     mode: "preview"
@@ -114,7 +115,8 @@ function renderShell() {
             <span class="product-icon" aria-hidden="true"><i></i></span>
             <div><strong>ROUTE CONSOLE</strong><span>PHYSICAL IPHONE SIMULATION</span></div>
           </div>
-          <div class="mission-clocks">
+          <div class="mission-clocks connection-stack">
+            <span class="status-pill connection-pill"><i class="status-dot"></i><span data-live="connection-label">Preview only</span></span>
             <span class="status-pill"><i class="status-dot"></i><span data-live="status">Ready to preview</span></span>
           </div>
         </header>
@@ -123,6 +125,20 @@ function renderShell() {
           <div class="operations-grid">
             <aside class="route-panel panel">
               <header class="panel-header"><span>ROUTE LEGS</span><b>2</b></header>
+              <section class="device-card" data-live-card="device">
+                <div class="device-card-top">
+                  <span class="device-indicator"></span>
+                  <div>
+                    <p>DEVICE LINK</p>
+                    <strong data-live="device-name">Backend offline</strong>
+                  </div>
+                </div>
+                <div class="device-grid">
+                  <span><small>MODEL</small><b data-live="device-model">—</b></span>
+                  <span><small>IOS</small><b data-live="device-ios">—</b></span>
+                </div>
+                <em data-live="device-detail">Open through the local backend to control the phone.</em>
+              </section>
               <div class="route-list">
                 <button class="route-card selected" data-direction="outbound">
                   <span class="route-state"></span>
@@ -177,7 +193,7 @@ function renderShell() {
               </section>
 
               <section class="control-section">
-                <p>TRANSPORT</p>
+                <p data-live="transport-title">PREVIEW TRANSPORT</p>
                 <div class="button-row">
                   <button class="primary" data-action="toggle"><span class="play-icon" aria-hidden="true">▶</span><span data-live="toggle-label">Start preview</span></button>
                   <button class="secondary danger" data-action="stop">■ STOP</button>
@@ -283,15 +299,27 @@ async function refreshBackendStatus() {
   try {
     const payload = await apiRequest("/api/status");
     state.backend.available = true;
+    state.backend.device = parseDevice(payload.device);
     state.backend.error = "";
     state.backend.playback = payload.playback || { state: "idle" };
     syncBackendPlayback();
   } catch (error) {
     state.backend.available = false;
+    state.backend.device = null;
     state.backend.error = "";
     state.backend.playback = { state: "idle" };
   }
   updateLiveState();
+}
+
+function parseDevice(report) {
+  if (!report || !report.device_probe_ok || !report.device_probe_output) return null;
+  try {
+    const devices = JSON.parse(report.device_probe_output);
+    return Array.isArray(devices) && devices.length ? devices[0] : null;
+  } catch (error) {
+    return null;
+  }
 }
 
 function syncBackendPlayback() {
@@ -511,6 +539,8 @@ function updateLiveState() {
   const current = interpolatedPoint();
   const percent = Math.round(state.progress * 100);
   const backendPlayback = state.backend.playback || { state: "idle" };
+  const device = state.backend.device;
+  const deviceOnline = state.backend.available && !!device;
   const status = state.backend.available && backendPlayback.state === "playing"
     ? `Phone traveling to ${destinationName()}`
     : state.backend.available && backendPlayback.state === "paused"
@@ -526,6 +556,11 @@ function updateLiveState() {
               : "Ready to preview";
 
   setText("status", status);
+  setText("connection-label", deviceOnline
+    ? "Backend + iPhone connected"
+    : state.backend.available
+      ? "Backend online / phone not detected"
+      : "Preview only");
   setText("origin", originName());
   setText("destination", destinationName());
   setText("toggle-label", state.backend.available
@@ -552,8 +587,19 @@ function updateLiveState() {
   setText("backend-note", state.backend.error
     ? state.backend.error
     : state.backend.available
-      ? "Connected to local iPhone backend"
+      ? deviceOnline
+        ? "Device controls are live"
+        : "Backend is running, but no USB iPhone is detected"
       : "Preview mode");
+  setText("transport-title", state.backend.available ? "IPHONE TRANSPORT" : "PREVIEW TRANSPORT");
+  setText("device-name", deviceOnline ? device.DeviceName || "Connected iPhone" : state.backend.available ? "No iPhone detected" : "Backend offline");
+  setText("device-model", deviceOnline ? device.ProductType || "iPhone" : "—");
+  setText("device-ios", deviceOnline ? device.ProductVersion || "—" : "—");
+  setText("device-detail", deviceOnline
+    ? `${device.ConnectionType || "USB"} · ${device.Identifier || "paired device"}`
+    : state.backend.available
+      ? "Connect and unlock the phone, then refresh status."
+      : "Run ./scripts/run_frontend.sh for live phone control.");
 
   document.querySelectorAll(".status-dot").forEach(dot => {
     dot.classList.toggle("playing", state.playing);
@@ -566,6 +612,10 @@ function updateLiveState() {
   document.querySelectorAll("[data-speed]").forEach(button =>
     button.classList.toggle("selected", Number(button.dataset.speed) === state.speed)
   );
+  document.querySelectorAll(".connection-pill, [data-live-card='device']").forEach(node => {
+    node.classList.toggle("online", deviceOnline);
+    node.classList.toggle("backend-only", state.backend.available && !deviceOnline);
+  });
 
   const progress = document.querySelector(".progress");
   const bar = document.querySelector('[data-live="progress-bar"]');
