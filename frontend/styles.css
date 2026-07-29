@@ -295,6 +295,20 @@ h1, h2, p { margin-top: 0; }
 .primary:hover { background: #57b2e3; }
 .secondary { padding: 0 10px; color: var(--red); background: transparent; border: 1px solid rgba(242, 86, 80, .34); }
 .secondary:hover { background: rgba(242, 86, 80, .08); }
+.clear-button {
+  width: 100%;
+  margin-top: 8px;
+  color: var(--muted);
+  border-color: var(--border);
+}
+.clear-button:hover { color: #dce6ee; background: rgba(255, 255, 255, .03); border-color: var(--blue); }
+.backend-note {
+  min-height: 14px;
+  margin: 9px 0 0 !important;
+  color: var(--dim) !important;
+  letter-spacing: 0 !important;
+  text-transform: none;
+}
 .play-icon { font-size: 8px; }
 .progress-label { display: flex; justify-content: space-between; margin-bottom: 8px; }
 .progress-label > span { color: var(--dim); font-size: 8px; letter-spacing: .16em; }

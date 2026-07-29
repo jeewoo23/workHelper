@@ -16,6 +16,7 @@ from .gpx import (
     summarize,
 )
 from .playback import PlaybackError, clear_route_location, play_route, set_route_location
+from .server import run_server
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -85,6 +86,10 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Use pymobiledevice3's no-root iOS 17+ userspace tunnel",
     )
+
+    serve = subparsers.add_parser("serve", help="Run the loopback backend and frontend")
+    serve.add_argument("--host", default="127.0.0.1")
+    serve.add_argument("--port", type=int, default=8765)
     return parser
 
 
@@ -193,6 +198,10 @@ def _run(arguments: argparse.Namespace) -> int:
             _print_command(result.arguments)
             return 0
         return _print_executed_result("Location clear", result.returncode)
+
+    if arguments.command == "serve":
+        run_server(host=arguments.host, port=arguments.port)
+        return 0
 
     raise AssertionError(f"Unhandled command: {arguments.command}")
 

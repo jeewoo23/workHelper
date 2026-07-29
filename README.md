@@ -3,18 +3,19 @@
 A local macOS development tool for preparing and playing timed GPX routes on a
 tethered physical iPhone.
 
-The project is currently implementing Phase 0 and Phase 1 from
+The project is currently implementing Phase 2 from
 [the build specification](docs/BUILD_SPEC.md):
 
 - Inspect local Xcode, Python, and `pymobiledevice3` prerequisites.
 - Convert Xcode waypoint GPX (`wpt`) into timed track GPX (`trkpt`).
 - Validate the L1 → L2 and L2 → L1 route halves.
 - Produce safe, dry-run-first playback and clear commands.
+- Run a loopback-only backend for frontend-driven iPhone playback.
 
 The CLI does not modify a connected phone unless `--execute` is explicitly
 provided.
 
-## Preview the frontend
+## Run the local controller
 
 From the repository root:
 
@@ -28,13 +29,14 @@ Then open:
 http://localhost:8765/
 ```
 
-The frontend loads the GPX route into a Cesium map backed by OpenStreetMap.
-Use the direction, playback-speed, and preview controls to inspect both route
-legs. No Cesium ion access token is required, but the map needs an internet
-connection to load Cesium and map tiles.
+This starts the loopback-only Python backend and serves the Cesium frontend.
+When the backend is running, the start, pause, stop, and clear controls operate
+on the tethered iPhone through `pymobiledevice3`.
 
-The frontend currently previews movement locally. It is not connected to the
-Python device-control CLI yet; that wiring is the next implementation phase.
+The frontend loads the GPX route into a Cesium map backed by OpenStreetMap.
+No Cesium ion access token is required, but the map needs an internet
+connection to load Cesium and map tiles. If you open `frontend/index.html`
+without the backend, the controls remain in local preview mode.
 
 ## Development setup
 

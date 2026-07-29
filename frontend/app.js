@@ -8,6 +8,12 @@ const state = {
   speed: 10,
   lastFrame: null,
   lastUiUpdate: null,
+  backend: {
+    available: false,
+    playback: { state: "idle" },
+    error: "",
+    mode: "preview"
+  },
   viewer: null,
   mapEntities: {}
 };
@@ -20,6 +26,7 @@ const pad = number => String(number).padStart(2, "0");
 const durationText = seconds => `${pad(Math.floor(seconds / 60))}:${pad(Math.floor(seconds % 60))}`;
 const destinationName = () => state.direction === "outbound" ? "L2" : "L1";
 const originName = () => state.direction === "outbound" ? "L1" : "L2";
+const routeId = () => state.direction === "outbound" ? "l1-to-l2" : "l2-to-l1";
 
 async function loadRoute() {
   try {
@@ -52,6 +59,7 @@ async function loadRoute() {
     renderShell();
     initCesiumMap();
     updateLiveState();
+    initBackend();
     requestAnimationFrame(tick);
   } catch (error) {
     showFatalError(error);
@@ -119,12 +127,12 @@ function renderShell() {
                 <button class="route-card selected" data-direction="outbound">
                   <span class="route-state"></span>
                   <span class="route-copy"><strong>L1 → L2</strong><small>Outbound · 20 min</small></span>
-                  <span class="route-count mono">47</span>
+                  <span class="route-count mono">${state.outbound.length}</span>
                 </button>
                 <button class="route-card" data-direction="inbound">
                   <span class="route-state"></span>
                   <span class="route-copy"><strong>L2 → L1</strong><small>Return · 20 min</small></span>
-                  <span class="route-count mono">47</span>
+                  <span class="route-count mono">${state.inbound.length}</span>
                 </button>
               </div>
 
@@ -174,6 +182,8 @@ function renderShell() {
                   <button class="primary" data-action="toggle"><span class="play-icon" aria-hidden="true">▶</span><span data-live="toggle-label">Start preview</span></button>
                   <button class="secondary danger" data-action="stop">■ STOP</button>
                 </div>
+                <button class="secondary clear-button" data-action="clear">CLEAR LOCATION</button>
+                <p class="backend-note" data-live="backend-note">Preview mode</p>
               </section>
 
               <section class="control-section">
@@ -217,20 +227,29 @@ function bindControls() {
     });
   });
 
-  document.querySelector('[data-action="toggle"]').addEventListener("click", () => {
+  document.querySelector('[data-action="toggle"]').addEventListener("click", async () => {
+    if (state.backend.available) {
+      await toggleDevicePlayback();
+      return;
+    }
     if (state.progress >= 1) state.progress = 0;
     state.playing = !state.playing;
     state.lastFrame = null;
     updateLiveState();
   });
 
-  document.querySelector('[data-action="stop"]').addEventListener("click", () => {
+  document.querySelector('[data-action="stop"]').addEventListener("click", async () => {
+    if (state.backend.available) {
+      await stopDevicePlayback();
+      return;
+    }
     state.playing = false;
     state.progress = 0;
     state.lastFrame = null;
     updateLiveState();
   });
 
+  document.querySelector('[data-action="clear"]').addEventListener("click", clearDeviceLocation);
   document.querySelector('[data-action="recenter"]').addEventListener("click", () => frameRoute(true));
 }
 
@@ -242,6 +261,100 @@ function setDirection(direction) {
   state.lastFrame = null;
   syncMapRoute();
   frameRoute(true);
+  updateLiveState();
+}
+
+async function initBackend() {
+  await refreshBackendStatus();
+  window.setInterval(refreshBackendStatus, 1000);
+}
+
+async function apiRequest(path, options = {}) {
+  const response = await fetch(path, {
+    ...options,
+    headers: { "Content-Type": "application/json", ...(options.headers || {}) }
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(payload.error || `Request failed (${response.status})`);
+  return payload;
+}
+
+async function refreshBackendStatus() {
+  try {
+    const payload = await apiRequest("/api/status");
+    state.backend.available = true;
+    state.backend.error = "";
+    state.backend.playback = payload.playback || { state: "idle" };
+    syncBackendPlayback();
+  } catch (error) {
+    state.backend.available = false;
+    state.backend.error = "";
+    state.backend.playback = { state: "idle" };
+  }
+  updateLiveState();
+}
+
+function syncBackendPlayback() {
+  const playback = state.backend.playback;
+  if (playback.routeId === "l1-to-l2" && state.direction !== "outbound") {
+    state.direction = "outbound";
+    syncMapRoute();
+    frameRoute(true);
+  }
+  if (playback.routeId === "l2-to-l1" && state.direction !== "inbound") {
+    state.direction = "inbound";
+    syncMapRoute();
+    frameRoute(true);
+  }
+  if (playback.state === "playing" || playback.state === "paused") {
+    state.backend.mode = "device";
+    state.progress = Math.min(1, Math.max(0, playback.progress || 0));
+    state.playing = playback.state === "playing";
+    state.lastFrame = null;
+  } else if (state.backend.mode === "device") {
+    state.playing = false;
+    state.lastFrame = null;
+  }
+}
+
+async function toggleDevicePlayback() {
+  try {
+    const playback = state.backend.playback;
+    if (playback.state === "playing") {
+      state.backend.playback = await apiRequest("/api/playback/pause", { method: "POST" });
+    } else if (playback.state === "paused") {
+      state.backend.playback = await apiRequest("/api/playback/resume", { method: "POST" });
+    } else {
+      state.progress = 0;
+      state.backend.mode = "device";
+      state.backend.playback = await apiRequest(`/api/routes/${routeId()}/start`, { method: "POST" });
+    }
+    syncBackendPlayback();
+  } catch (error) {
+    state.backend.error = error.message;
+  }
+  updateLiveState();
+}
+
+async function stopDevicePlayback() {
+  try {
+    state.backend.playback = await apiRequest("/api/playback/stop", { method: "POST" });
+    state.backend.mode = "preview";
+    state.playing = false;
+    state.progress = 0;
+  } catch (error) {
+    state.backend.error = error.message;
+  }
+  updateLiveState();
+}
+
+async function clearDeviceLocation() {
+  try {
+    await apiRequest("/api/location/clear", { method: "POST" });
+    state.backend.error = "";
+  } catch (error) {
+    state.backend.error = error.message;
+  }
   updateLiveState();
 }
 
@@ -397,18 +510,31 @@ function updateLiveState() {
   const elapsed = total * state.progress;
   const current = interpolatedPoint();
   const percent = Math.round(state.progress * 100);
-  const status = state.playing
-    ? `Traveling to ${destinationName()}`
-    : state.progress >= 1
-      ? `Arrived at ${destinationName()}`
-      : state.progress > 0
-        ? "Paused"
-        : "Ready to preview";
+  const backendPlayback = state.backend.playback || { state: "idle" };
+  const status = state.backend.available && backendPlayback.state === "playing"
+    ? `Phone traveling to ${destinationName()}`
+    : state.backend.available && backendPlayback.state === "paused"
+      ? "Phone route paused"
+      : state.playing
+        ? `Previewing to ${destinationName()}`
+        : state.progress >= 1
+          ? `Arrived at ${destinationName()}`
+          : state.progress > 0
+            ? "Paused"
+            : state.backend.available
+              ? "Phone backend ready"
+              : "Ready to preview";
 
   setText("status", status);
   setText("origin", originName());
   setText("destination", destinationName());
-  setText("toggle-label", state.playing ? "Pause" : state.progress > 0 && state.progress < 1 ? "Resume" : "Start preview");
+  setText("toggle-label", state.backend.available
+    ? backendPlayback.state === "playing"
+      ? "Pause phone"
+      : backendPlayback.state === "paused"
+        ? "Resume phone"
+        : "Start on phone"
+    : state.playing ? "Pause" : state.progress > 0 && state.progress < 1 ? "Resume" : "Start preview");
   setText("progress-text", `${percent}% complete`);
   setText("progress-percent", `${percent}%`);
   setText("point-count", `${route().length}`);
@@ -416,7 +542,18 @@ function updateLiveState() {
   setText("remaining", durationText(Math.max(0, total - elapsed)));
   setText("latitude", fmt.format(current.lat));
   setText("longitude", fmt.format(current.lon));
-  setText("control-state", state.playing ? "RUNNING" : state.progress >= 1 ? "COMPLETE" : state.progress > 0 ? "PAUSED" : "STANDBY");
+  setText("control-state", state.backend.available
+    ? backendPlayback.state === "playing"
+      ? "DEVICE"
+      : backendPlayback.state === "paused"
+        ? "PAUSED"
+        : "READY"
+    : state.playing ? "RUNNING" : state.progress >= 1 ? "COMPLETE" : state.progress > 0 ? "PAUSED" : "STANDBY");
+  setText("backend-note", state.backend.error
+    ? state.backend.error
+    : state.backend.available
+      ? "Connected to local iPhone backend"
+      : "Preview mode");
 
   document.querySelectorAll(".status-dot").forEach(dot => {
     dot.classList.toggle("playing", state.playing);
