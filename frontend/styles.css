@@ -261,6 +261,33 @@ h1, h2, p { margin-top: 0; }
 }
 .coordinate-readout div span { color: var(--dim); font-size: 8px; letter-spacing: .12em; }
 .coordinate-readout strong { color: #b9c7d3; font-size: 10px; font-weight: 400; }
+.physical-readout {
+  border-top-color: rgba(242, 193, 78, .25);
+}
+.physical-readout div {
+  background: rgba(242, 193, 78, .045);
+  border-color: rgba(242, 193, 78, .18);
+}
+.location-button {
+  width: 100%;
+  min-height: 32px;
+  margin-top: 1px;
+  color: #f2c14e;
+  border-color: rgba(242, 193, 78, .36);
+}
+.location-button:hover {
+  color: #ffe09b;
+  background: rgba(242, 193, 78, .08);
+  border-color: rgba(242, 193, 78, .58);
+}
+.physical-readout em {
+  display: block;
+  margin-top: 9px;
+  color: var(--muted);
+  font-size: 9px;
+  font-style: normal;
+  line-height: 1.45;
+}
 
 .map-card { position: relative; min-width: 0; min-height: calc(100vh - 108px); overflow: hidden; background: #101820; }
 .map-titlebar {
@@ -329,6 +356,7 @@ h1, h2, p { margin-top: 0; }
 }
 .map-legend span { display: flex; gap: 5px; align-items: center; }
 .legend-dot { width: 7px; height: 7px; background: white; border: 2px solid #202b35; border-radius: 50%; }
+.legend-dot.physical { background: #f2c14e; }
 .legend-line { width: 13px; height: 2px; border-radius: 99px; }
 .legend-line.route { background: #78a8ff; }
 .legend-line.traveled { background: #8cffb2; }

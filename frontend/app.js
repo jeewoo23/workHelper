@@ -15,6 +15,12 @@ const state = {
     error: "",
     mode: "preview"
   },
+  physicalLocation: {
+    status: "idle",
+    coords: null,
+    error: "",
+    watchId: null
+  },
   viewer: null,
   mapEntities: {}
 };
@@ -158,6 +164,14 @@ function renderShell() {
                 <div><span>LONGITUDE</span><strong class="mono" data-live="longitude">—</strong></div>
               </div>
 
+              <div class="coordinate-readout physical-readout">
+                <p>MAC PHYSICAL LOCATION</p>
+                <div><span>LATITUDE</span><strong class="mono" data-live="physical-latitude">—</strong></div>
+                <div><span>LONGITUDE</span><strong class="mono" data-live="physical-longitude">—</strong></div>
+                <button class="secondary location-button" data-action="physical-location"><span data-live="physical-location-label">SHOW MARKER</span></button>
+                <em data-live="physical-location-note">Uses browser Location Services on this Mac, not simulated iPhone GPS.</em>
+              </div>
+
             </aside>
 
             <section class="map-card panel" aria-label="Interactive route map">
@@ -170,7 +184,8 @@ function renderShell() {
                 <button class="map-button" data-action="recenter" aria-label="Recenter route"><span aria-hidden="true">⌖</span> RECENTER</button>
               </div>
               <div class="map-legend">
-                <span><i class="legend-dot current"></i>Position</span>
+                <span><i class="legend-dot current"></i>Simulated</span>
+                <span><i class="legend-dot physical"></i>Mac physical</span>
                 <span><i class="legend-line route"></i>Route</span>
                 <span><i class="legend-line traveled"></i>Traveled</span>
               </div>
@@ -267,6 +282,7 @@ function bindControls() {
 
   document.querySelector('[data-action="clear"]').addEventListener("click", clearDeviceLocation);
   document.querySelector('[data-action="recenter"]').addEventListener("click", () => frameRoute(true));
+  document.querySelector('[data-action="physical-location"]').addEventListener("click", togglePhysicalLocationMarker);
 }
 
 function setDirection(direction) {
@@ -473,7 +489,104 @@ function syncMapRoute() {
       disableDepthTestDistance: Number.POSITIVE_INFINITY
     }
   });
+  syncPhysicalLocationMarker();
   viewer.scene.requestRender();
+}
+
+function syncPhysicalLocationMarker() {
+  const viewer = state.viewer;
+  if (!viewer || viewer.isDestroyed()) return;
+
+  if (!state.physicalLocation.coords) {
+    if (state.mapEntities.physicalLocation) {
+      viewer.entities.remove(state.mapEntities.physicalLocation);
+      delete state.mapEntities.physicalLocation;
+      viewer.scene.requestRender();
+    }
+    return;
+  }
+
+  const { lat, lon, accuracy } = state.physicalLocation.coords;
+  const position = Cesium.Cartesian3.fromDegrees(lon, lat);
+  const labelText = `Mac physical${Number.isFinite(accuracy) ? ` ±${Math.round(accuracy)}m` : ""}`;
+  if (!state.mapEntities.physicalLocation) {
+    state.mapEntities.physicalLocation = viewer.entities.add({
+      position,
+      point: {
+        pixelSize: 15,
+        color: Cesium.Color.fromCssColorString("#f2c14e"),
+        outlineColor: Cesium.Color.fromCssColorString("#111820"),
+        outlineWidth: 4,
+        disableDepthTestDistance: Number.POSITIVE_INFINITY
+      },
+      label: {
+        text: labelText,
+        font: "700 12px -apple-system, BlinkMacSystemFont, sans-serif",
+        fillColor: Cesium.Color.WHITE,
+        showBackground: true,
+        backgroundColor: Cesium.Color.fromCssColorString("#10161d").withAlpha(0.88),
+        backgroundPadding: new Cesium.Cartesian2(9, 6),
+        pixelOffset: new Cesium.Cartesian2(0, -30),
+        disableDepthTestDistance: Number.POSITIVE_INFINITY
+      }
+    });
+  } else {
+    state.mapEntities.physicalLocation.position = position;
+    state.mapEntities.physicalLocation.label.text = labelText;
+  }
+  viewer.scene.requestRender();
+}
+
+function togglePhysicalLocationMarker() {
+  if (state.physicalLocation.watchId !== null) {
+    navigator.geolocation.clearWatch(state.physicalLocation.watchId);
+    state.physicalLocation.watchId = null;
+    state.physicalLocation.status = "idle";
+    state.physicalLocation.coords = null;
+    state.physicalLocation.error = "";
+    syncPhysicalLocationMarker();
+    updateLiveState();
+    return;
+  }
+
+  if (!navigator.geolocation) {
+    state.physicalLocation.status = "error";
+    state.physicalLocation.error = "Browser Location Services are unavailable.";
+    updateLiveState();
+    return;
+  }
+
+  state.physicalLocation.status = "requesting";
+  state.physicalLocation.error = "";
+  updateLiveState();
+  state.physicalLocation.watchId = navigator.geolocation.watchPosition(
+    position => {
+      state.physicalLocation.status = "watching";
+      state.physicalLocation.coords = {
+        lat: position.coords.latitude,
+        lon: position.coords.longitude,
+        accuracy: position.coords.accuracy,
+        timestamp: position.timestamp
+      };
+      state.physicalLocation.error = "";
+      syncPhysicalLocationMarker();
+      updateLiveState();
+    },
+    error => {
+      state.physicalLocation.status = "error";
+      state.physicalLocation.error = locationErrorMessage(error);
+      syncPhysicalLocationMarker();
+      updateLiveState();
+    },
+    { enableHighAccuracy: true, maximumAge: 5000, timeout: 15000 }
+  );
+}
+
+function locationErrorMessage(error) {
+  if (error.code === error.PERMISSION_DENIED) return "Location permission was denied for this browser.";
+  if (error.code === error.POSITION_UNAVAILABLE) return "This Mac's physical location is unavailable.";
+  if (error.code === error.TIMEOUT) return "Timed out while asking macOS for location.";
+  return error.message || "Could not read this Mac's physical location.";
 }
 
 function addEndpoint(point, label, color) {
@@ -577,6 +690,16 @@ function updateLiveState() {
   setText("remaining", durationText(Math.max(0, total - elapsed)));
   setText("latitude", fmt.format(current.lat));
   setText("longitude", fmt.format(current.lon));
+  setText("physical-latitude", state.physicalLocation.coords ? fmt.format(state.physicalLocation.coords.lat) : "—");
+  setText("physical-longitude", state.physicalLocation.coords ? fmt.format(state.physicalLocation.coords.lon) : "—");
+  setText("physical-location-label", state.physicalLocation.watchId !== null ? "HIDE MARKER" : "SHOW MARKER");
+  setText("physical-location-note", state.physicalLocation.error
+    ? state.physicalLocation.error
+    : state.physicalLocation.status === "requesting"
+      ? "Waiting for browser Location Services permission…"
+      : state.physicalLocation.coords
+        ? `Browser Location Services · accuracy ±${Math.round(state.physicalLocation.coords.accuracy)}m`
+        : "Uses browser Location Services on this Mac, not simulated iPhone GPS.");
   setText("control-state", state.backend.available
     ? backendPlayback.state === "playing"
       ? "DEVICE"
