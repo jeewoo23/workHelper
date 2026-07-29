@@ -427,6 +427,11 @@ h1, h2, p { margin-top: 0; }
   border: 1px solid var(--blue);
 }
 .primary:hover { background: #57b2e3; }
+.primary.preview-warning {
+  background: #f2c14e;
+  border-color: #f2c14e;
+}
+.primary.preview-warning:hover { background: #ffd56b; }
 .secondary { padding: 0 10px; color: var(--red); background: transparent; border: 1px solid rgba(242, 86, 80, .34); }
 .secondary:hover { background: rgba(242, 86, 80, .08); }
 .clear-button {
@@ -454,9 +459,29 @@ h1, h2, p { margin-top: 0; }
 .progress { height: 4px; overflow: hidden; background: #1f2b36; border-radius: 99px; }
 .progress > div { width: 0; height: 100%; background: var(--blue); border-radius: inherit; transition: width .1s linear; }
 .time-pair { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 14px; }
-.time-pair span { display: grid; gap: 5px; padding: 9px; background: var(--panel-deep); border: 1px solid var(--border-soft); border-radius: 5px; }
+.time-pair span,
+.time-pair label { display: grid; gap: 5px; padding: 9px; background: var(--panel-deep); border: 1px solid var(--border-soft); border-radius: 5px; }
 .time-pair small { color: var(--dim); font-size: 7px; letter-spacing: .14em; }
 .time-pair strong { color: #c7d1da; font-size: 12px; font-weight: 400; }
+.time-pair input {
+  width: 100%;
+  min-width: 0;
+  padding: 0;
+  color: #c7d1da;
+  background: transparent;
+  border: 0;
+  font-size: 12px;
+  font-weight: 400;
+}
+.time-pair input:focus { outline: none; color: white; }
+.time-pair label:focus-within {
+  border-color: rgba(242, 193, 78, .52);
+  box-shadow: 0 0 0 1px rgba(242, 193, 78, .15);
+}
+.time-pair input:disabled {
+  color: var(--dim);
+  cursor: not-allowed;
+}
 .segmented { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; }
 .segmented button {
   min-height: 31px;

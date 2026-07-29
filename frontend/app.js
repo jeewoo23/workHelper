@@ -8,6 +8,11 @@ const state = {
   speed: 10,
   lastFrame: null,
   lastUiUpdate: null,
+  previewDurationSeconds: {
+    outbound: null,
+    inbound: null
+  },
+  previewRemainingInputFocused: false,
   backend: {
     available: false,
     device: null,
@@ -65,6 +70,8 @@ async function loadRoute() {
 
     state.outbound = state.points.slice(0, l2Index + 1);
     state.inbound = state.points.slice(l2Index);
+    state.previewDurationSeconds.outbound = routeDurationFromPoints(state.outbound);
+    state.previewDurationSeconds.inbound = routeDurationFromPoints(state.inbound);
     renderShell();
     initCesiumMap();
     updateLiveState();
@@ -79,10 +86,33 @@ function route() {
   return state.direction === "outbound" ? state.outbound : state.inbound;
 }
 
-function elapsedRouteSeconds() {
-  const points = route();
+function routeDurationFromPoints(points) {
   if (points.length < 2) return 0;
   return Math.max(0, (points.at(-1).time - points[0].time) / 1000);
+}
+
+function elapsedRouteSeconds() {
+  return routeDurationFromPoints(route());
+}
+
+function previewDurationSeconds() {
+  return state.previewDurationSeconds[state.direction] || elapsedRouteSeconds();
+}
+
+function isPhoneControllable() {
+  return state.backend.available && !!state.backend.device;
+}
+
+function isDevicePlaybackActive() {
+  const playbackState = state.backend.playback?.state;
+  return state.backend.available && (playbackState === "playing" || playbackState === "paused");
+}
+
+function playbackDurationSeconds() {
+  if (isDevicePlaybackActive() && Number.isFinite(state.backend.playback.durationSeconds)) {
+    return state.backend.playback.durationSeconds;
+  }
+  return previewDurationSeconds();
 }
 
 function interpolatedPoint() {
@@ -226,7 +256,7 @@ function renderShell() {
                 </div>
                 <div class="time-pair">
                   <span><small>ELAPSED</small><strong class="mono" data-live="elapsed">00:00</strong></span>
-                  <span><small>REMAINING</small><strong class="mono" data-live="remaining">20:00</strong></span>
+                  <label><small>REMAINING MIN</small><input class="mono" data-live-input="remaining-minutes" type="number" min="0.1" step="0.1" value="20"></label>
                 </div>
               </section>
 
@@ -261,30 +291,60 @@ function bindControls() {
   });
 
   document.querySelector('[data-action="toggle"]').addEventListener("click", async () => {
-    if (state.backend.available) {
+    if (isPhoneControllable()) {
       await toggleDevicePlayback();
       return;
     }
-    if (state.progress >= 1) state.progress = 0;
-    state.playing = !state.playing;
-    state.lastFrame = null;
-    updateLiveState();
+    togglePreviewPlayback();
   });
 
   document.querySelector('[data-action="stop"]').addEventListener("click", async () => {
-    if (state.backend.available) {
+    if (isDevicePlaybackActive()) {
       await stopDevicePlayback();
       return;
     }
-    state.playing = false;
-    state.progress = 0;
-    state.lastFrame = null;
-    updateLiveState();
+    stopPreviewPlayback();
   });
 
   document.querySelector('[data-action="clear"]').addEventListener("click", clearDeviceLocation);
   document.querySelector('[data-action="recenter"]').addEventListener("click", () => frameRoute(true));
   document.querySelector('[data-action="physical-location"]').addEventListener("click", togglePhysicalLocationMarker);
+  const remainingInput = document.querySelector('[data-live-input="remaining-minutes"]');
+  remainingInput.addEventListener("focus", () => {
+    state.previewRemainingInputFocused = true;
+  });
+  remainingInput.addEventListener("blur", () => {
+    state.previewRemainingInputFocused = false;
+    syncRemainingInput();
+  });
+  remainingInput.addEventListener("change", updatePreviewDurationFromRemainingInput);
+}
+
+function togglePreviewPlayback() {
+  if (state.progress >= 1) state.progress = 0;
+  state.playing = !state.playing;
+  state.lastFrame = null;
+  updateLiveState();
+}
+
+function stopPreviewPlayback() {
+  state.playing = false;
+  state.progress = 0;
+  state.lastFrame = null;
+  updateLiveState();
+}
+
+function updatePreviewDurationFromRemainingInput(event) {
+  const remainingMinutes = Number(event.target.value);
+  if (!Number.isFinite(remainingMinutes) || remainingMinutes <= 0) {
+    syncRemainingInput();
+    return;
+  }
+  const currentTotal = playbackDurationSeconds();
+  const elapsed = currentTotal * state.progress;
+  state.previewDurationSeconds[state.direction] = Math.max(1, elapsed + remainingMinutes * 60);
+  state.lastFrame = null;
+  updateLiveState();
 }
 
 function setDirection(direction) {
@@ -724,14 +784,16 @@ function frameRoute(animated) {
 function updateLiveState() {
   if (!state.points.length) return;
 
-  const total = elapsedRouteSeconds();
+  const total = playbackDurationSeconds();
   const elapsed = total * state.progress;
   const current = interpolatedPoint();
   const percent = Math.round(state.progress * 100);
   const backendPlayback = state.backend.playback || { state: "idle" };
   const device = state.backend.device;
   const deviceMessage = deviceProbeMessage(state.backend.deviceReport);
-  const deviceOnline = state.backend.available && !!device;
+  const deviceOnline = isPhoneControllable();
+  const devicePlaybackActive = isDevicePlaybackActive();
+  const previewWithoutPhone = state.backend.available && !deviceOnline;
   const backendError = state.backend.error;
   const status = state.backend.available && backendPlayback.state === "playing"
     ? `Phone traveling to ${destinationName()}`
@@ -757,18 +819,24 @@ function updateLiveState() {
       : "Preview only");
   setText("origin", originName());
   setText("destination", destinationName());
-  setText("toggle-label", state.backend.available
+  setText("toggle-label", deviceOnline || devicePlaybackActive
     ? backendPlayback.state === "playing"
       ? "Pause phone"
       : backendPlayback.state === "paused"
         ? "Resume phone"
         : "Start on phone"
-    : state.playing ? "Pause" : state.progress > 0 && state.progress < 1 ? "Resume" : "Start preview");
+    : state.playing
+      ? "Pause preview"
+      : state.progress > 0 && state.progress < 1
+        ? "Resume preview"
+        : previewWithoutPhone
+          ? "Simulate path without phone"
+          : "Start preview");
   setText("progress-text", `${percent}% complete`);
   setText("progress-percent", `${percent}%`);
   setText("point-count", `${route().length}`);
   setText("elapsed", durationText(elapsed));
-  setText("remaining", durationText(Math.max(0, total - elapsed)));
+  syncRemainingInput();
   setText("latitude", fmt.format(current.lat));
   setText("longitude", fmt.format(current.lon));
   setText("physical-latitude", state.physicalLocation.coords ? fmt.format(state.physicalLocation.coords.lat) : "—");
@@ -786,16 +854,22 @@ function updateLiveState() {
       ? "DEVICE"
       : backendPlayback.state === "paused"
         ? "PAUSED"
-        : "READY"
+        : state.playing
+          ? "PREVIEW"
+          : previewWithoutPhone
+            ? "NO PHONE"
+            : "READY"
     : state.playing ? "RUNNING" : state.progress >= 1 ? "COMPLETE" : state.progress > 0 ? "PAUSED" : "STANDBY");
   setText("backend-note", state.backend.error
     ? state.backend.error
     : state.backend.available
       ? deviceOnline
         ? "Device controls are live"
-        : deviceMessage || "Backend is running, but no USB iPhone is detected"
+        : state.playing
+          ? "Preview simulation is running locally; no phone is being controlled."
+          : deviceMessage || "Backend is running, but no USB iPhone is detected"
       : "Preview mode");
-  setText("transport-title", state.backend.available ? "IPHONE TRANSPORT" : "PREVIEW TRANSPORT");
+  setText("transport-title", deviceOnline ? "IPHONE TRANSPORT" : "PREVIEW TRANSPORT");
   setText("device-name", deviceOnline ? device.DeviceName || "Connected iPhone" : state.backend.available ? "No iPhone detected" : "Backend offline");
   setText("device-model", deviceOnline ? device.ProductType || "iPhone" : "—");
   setText("device-ios", deviceOnline ? device.ProductVersion || "—" : "—");
@@ -810,6 +884,10 @@ function updateLiveState() {
     dot.classList.toggle("complete", state.progress >= 1);
   });
   document.querySelector(".play-icon").textContent = state.playing ? "Ⅱ" : "▶";
+  const toggleButton = document.querySelector('[data-action="toggle"]');
+  if (toggleButton) {
+    toggleButton.classList.toggle("preview-warning", previewWithoutPhone && !deviceOnline);
+  }
   document.querySelectorAll("[data-direction]").forEach(button =>
     button.classList.toggle("selected", button.dataset.direction === state.direction)
   );
@@ -846,6 +924,24 @@ function setRouteText(key, value) {
   });
 }
 
+function syncRemainingInput() {
+  const input = document.querySelector('[data-live-input="remaining-minutes"]');
+  if (!input || state.previewRemainingInputFocused) return;
+  const total = playbackDurationSeconds();
+  const remaining = Math.max(0, total - total * state.progress);
+  input.value = formatMinutesInput(remaining / 60);
+  input.disabled = isDevicePlaybackActive();
+  input.title = input.disabled
+    ? "Phone playback uses the saved GPX timing. Stop phone playback before editing preview timing."
+    : "Edit remaining preview minutes. At 0%, this is the total preview duration.";
+}
+
+function formatMinutesInput(minutes) {
+  if (!Number.isFinite(minutes)) return "0";
+  if (minutes >= 10) return String(Math.round(minutes));
+  return String(Math.round(minutes * 10) / 10);
+}
+
 function showMapError(message) {
   const element = document.querySelector('[data-live="map-error"]');
   if (!element) return;
@@ -873,7 +969,7 @@ function escapeHtml(value) {
 function tick(now) {
   if (state.playing) {
     if (state.lastFrame !== null) {
-      const total = elapsedRouteSeconds();
+      const total = playbackDurationSeconds();
       if (total > 0) {
         state.progress = Math.min(1, state.progress + ((now - state.lastFrame) / 1000) * state.speed / total);
       }
