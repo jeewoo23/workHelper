@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "routes": [
+    {
+      "id": "l1-to-l2",
+      "label": "L1 to L2",
+      "direction": "outbound",
+      "originLabel": "L1",
+      "destinationLabel": "L2",
+      "sourcePath": "routes/source/route_final.gpx",
+      "trackPath": "routes/tracks/route_L1_to_L2.track.gpx",
+      "createdAt": "2026-07-28T00:00:00Z",
+      "bundled": true
+    },
+    {
+      "id": "l2-to-l1",
+      "label": "L2 to L1",
+      "direction": "inbound",
+      "originLabel": "L2",
+      "destinationLabel": "L1",
+      "sourcePath": "routes/source/route_final.gpx",
+      "trackPath": "routes/tracks/route_L2_to_L1.track.gpx",
+      "createdAt": "2026-07-28T00:00:00Z",
+      "bundled": true
+    }
+  ]
+}

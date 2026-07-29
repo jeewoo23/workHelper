@@ -16,24 +16,12 @@ from urllib.parse import unquote, urlparse
 from .environment import inspect_environment
 from .gpx import parse_track, summarize
 from .playback import clear_arguments, play_arguments, resolve_executable
+from .routes import RouteRecord, RouteRegistry, RouteRegistryError
 
 
 ROOT = Path(__file__).resolve().parents[2]
 FRONTEND_DIR = ROOT / "frontend"
-ROUTES = {
-    "l1-to-l2": {
-        "id": "l1-to-l2",
-        "label": "L1 to L2",
-        "direction": "outbound",
-        "path": ROOT / "routes/tracks/route_L1_to_L2.track.gpx",
-    },
-    "l2-to-l1": {
-        "id": "l2-to-l1",
-        "label": "L2 to L1",
-        "direction": "inbound",
-        "path": ROOT / "routes/tracks/route_L2_to_L1.track.gpx",
-    },
-}
+DEFAULT_REGISTRY = RouteRegistry(ROOT)
 
 
 @dataclass
@@ -71,11 +59,14 @@ def friendly_device_error(message: str) -> str:
 
 
 class PlaybackManager:
-    def __init__(self, *, userspace: bool = True) -> None:
+    def __init__(
+        self, *, userspace: bool = True, registry: Optional[RouteRegistry] = None
+    ) -> None:
         self._lock = Lock()
         self._active: Optional[ActivePlayback] = None
         self._userspace = userspace
         self._last_error: Optional[dict[str, str]] = None
+        self._registry = registry or DEFAULT_REGISTRY
 
     def status(self) -> dict[str, Any]:
         with self._lock:
@@ -83,8 +74,9 @@ class PlaybackManager:
             return self._status_locked()
 
     def start(self, route_id: str) -> dict[str, Any]:
-        route = ROUTES.get(route_id)
-        if route is None:
+        try:
+            route = self._registry.get(route_id)
+        except RouteRegistryError:
             raise ApiError(HTTPStatus.NOT_FOUND, f"Unknown route: {route_id}")
 
         with self._lock:
@@ -98,10 +90,10 @@ class PlaybackManager:
             command_executable = resolve_executable(None)
             arguments = play_arguments(
                 command_executable,
-                route["path"],
+                route.track_path,
                 userspace=self._userspace,
             )
-            name, points = parse_track(route["path"])
+            name, points = parse_track(route.track_path)
             summary = summarize(name, points)
             try:
                 process = subprocess.Popen(
@@ -119,7 +111,7 @@ class PlaybackManager:
                 ) from error
             self._active = ActivePlayback(
                 route_id=route_id,
-                label=str(route["label"]),
+                label=route.label,
                 started_at=time.monotonic(),
                 duration_seconds=summary.duration_seconds,
                 process=process,
@@ -291,6 +283,14 @@ class RouteRequestHandler(BaseHTTPRequestHandler):
             self._serve_static(parsed.path)
         except ApiError as error:
             self._send_error(error)
+        except RouteRegistryError as error:
+            self._send_error(
+                ApiError(
+                    HTTPStatus.BAD_REQUEST,
+                    str(error),
+                    code="route_registry_invalid",
+                )
+            )
         except Exception as error:
             self._send_error(
                 ApiError(
@@ -370,20 +370,32 @@ class RouteRequestHandler(BaseHTTPRequestHandler):
         )
 
 
-def route_payloads() -> list[dict[str, Any]]:
-    return [route_payload(route_id) for route_id in ROUTES]
+def route_payloads(registry: Optional[RouteRegistry] = None) -> list[dict[str, Any]]:
+    active_registry = registry or DEFAULT_REGISTRY
+    return [route_payload(route.id, active_registry) for route in active_registry.all()]
 
 
-def route_payload(route_id: str) -> dict[str, Any]:
-    route = ROUTES.get(route_id)
-    if route is None:
+def route_payload(
+    route_id: str, registry: Optional[RouteRegistry] = None
+) -> dict[str, Any]:
+    active_registry = registry or DEFAULT_REGISTRY
+    try:
+        route = active_registry.get(route_id)
+    except RouteRegistryError:
         raise ApiError(HTTPStatus.NOT_FOUND, f"Unknown route: {route_id}")
-    name, points = parse_track(route["path"])
+    name, points = parse_track(route.track_path)
     summary = summarize(name, points)
+    source_path = _relative_path(route.source_path) if route.source_path else None
     return {
-        "id": route["id"],
-        "label": route["label"],
-        "direction": route["direction"],
+        "id": route.id,
+        "label": route.label,
+        "direction": route.direction,
+        "originLabel": route.origin_label,
+        "destinationLabel": route.destination_label,
+        "trackPath": _relative_path(route.track_path),
+        "sourcePath": source_path,
+        "createdAt": route.created_at,
+        "bundled": route.bundled,
         "pointCount": summary.point_count,
         "durationSeconds": summary.duration_seconds,
         "start": {
@@ -399,12 +411,19 @@ def route_payload(route_id: str) -> dict[str, Any]:
     }
 
 
+def _relative_path(path: Path) -> str:
+    try:
+        return str(path.resolve().relative_to(ROOT))
+    except ValueError:
+        return str(path)
+
+
 def run_server(host: str = "127.0.0.1", port: int = 8765) -> None:
     if host not in ("127.0.0.1", "localhost"):
         raise ApiError(HTTPStatus.BAD_REQUEST, "The backend must bind to loopback only")
 
     handler = RouteRequestHandler
-    handler.manager = PlaybackManager(userspace=True)
+    handler.manager = PlaybackManager(userspace=True, registry=DEFAULT_REGISTRY)
     server = ThreadingHTTPServer((host, port), handler)
 
     def stop_server(signum: int, frame: Any) -> None:

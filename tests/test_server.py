@@ -1,10 +1,15 @@
 import signal
 import subprocess
 from io import StringIO
+from pathlib import Path
 
 import pytest
 
 from route_controller.server import ApiError, PlaybackManager, friendly_device_error, route_payload
+from route_controller.routes import RouteRegistry, RouteRegistryError
+
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 class FakeProcess:
@@ -42,10 +47,47 @@ def test_route_payload_reports_checked_in_tracks() -> None:
     outbound = route_payload("l1-to-l2")
     inbound = route_payload("l2-to-l1")
 
+    assert outbound["label"] == "L1 to L2"
+    assert outbound["originLabel"] == "L1"
+    assert outbound["destinationLabel"] == "L2"
+    assert outbound["trackPath"] == "routes/tracks/route_L1_to_L2.track.gpx"
+    assert outbound["bundled"] is True
     assert outbound["pointCount"] == 2933
     assert inbound["pointCount"] == 2441
     assert outbound["durationSeconds"] == 1200
     assert inbound["durationSeconds"] == 1200
+
+
+def test_route_registry_loads_seeded_routes() -> None:
+    registry = RouteRegistry(ROOT)
+    routes = registry.all()
+
+    assert [route.id for route in routes] == ["l1-to-l2", "l2-to-l1"]
+    assert routes[0].track_path == ROOT / "routes/tracks/route_L1_to_L2.track.gpx"
+
+
+def test_route_registry_rejects_paths_outside_project(tmp_path: Path) -> None:
+    registry_path = tmp_path / "routes.json"
+    registry_path.write_text(
+        """
+        {
+          "routes": [
+            {
+              "id": "bad",
+              "label": "Bad",
+              "direction": "outbound",
+              "trackPath": "../outside.gpx"
+            }
+          ]
+        }
+        """,
+        encoding="utf-8",
+    )
+
+    registry = RouteRegistry(ROOT, registry_path=registry_path)
+
+    with pytest.raises(RouteRegistryError, match="escapes project root"):
+        registry.all()
 
 
 def test_playback_manager_owns_one_process(monkeypatch) -> None:
@@ -63,7 +105,7 @@ def test_playback_manager_owns_one_process(monkeypatch) -> None:
         lambda *args, **kwargs: subprocess.CompletedProcess(args, 0, "", ""),
     )
 
-    manager = PlaybackManager(userspace=True)
+    manager = PlaybackManager(userspace=True, registry=RouteRegistry(ROOT))
     status = manager.start("l1-to-l2")
 
     assert status["state"] == "playing"
