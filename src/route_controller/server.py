@@ -47,11 +47,35 @@ class ActivePlayback:
     total_paused_seconds: float = 0.0
 
 
+def friendly_device_error(message: str) -> str:
+    lower = message.lower()
+    if "unable to connect to tunneld" in lower:
+        return (
+            "The iPhone developer tunnel is not running. Start it with "
+            "`sudo python3 -m pymobiledevice3 remote tunneld`, or use the userspace "
+            "tunnel if your command supports it."
+        )
+    if "no usb-connected iphone" in lower or "no device" in lower:
+        return "No USB iPhone was detected. Plug in the phone, unlock it, and tap Trust if iOS asks."
+    if "developer mode" in lower:
+        return "Developer Mode is not available on the iPhone. Enable Developer Mode in Settings and reconnect the phone."
+    if "developerdiskimage" in lower or "mount" in lower:
+        return "The iPhone developer image is not mounted. Try `uv run pymobiledevice3 mounter mount`, then retry."
+    if "pass --userspace" in lower or "no-root tunnel" in lower:
+        return "This iOS version needs the userspace developer tunnel. The app uses `--userspace`; reconnect the phone and retry."
+    if "lockdown" in lower or "invalid hostid" in lower or "pair" in lower:
+        return "The iPhone pairing is not ready. Unlock the phone, confirm Trust This Computer, then retry."
+    if "timed out" in lower or "timeout" in lower:
+        return "The device command timed out. Keep the phone unlocked and connected, then retry."
+    return message.strip() or "The device command failed."
+
+
 class PlaybackManager:
     def __init__(self, *, userspace: bool = True) -> None:
         self._lock = Lock()
         self._active: Optional[ActivePlayback] = None
         self._userspace = userspace
+        self._last_error: Optional[dict[str, str]] = None
 
     def status(self) -> dict[str, Any]:
         with self._lock:
@@ -79,12 +103,20 @@ class PlaybackManager:
             )
             name, points = parse_track(route["path"])
             summary = summarize(name, points)
-            process = subprocess.Popen(
-                arguments,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-                text=True,
-            )
+            try:
+                process = subprocess.Popen(
+                    arguments,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+            except OSError as error:
+                raise ApiError(
+                    HTTPStatus.BAD_GATEWAY,
+                    friendly_device_error(str(error)),
+                    detail=str(error),
+                    code="device_command_failed",
+                ) from error
             self._active = ActivePlayback(
                 route_id=route_id,
                 label=str(route["label"]),
@@ -145,7 +177,13 @@ class PlaybackManager:
         )
         if result.returncode != 0:
             message = result.stderr.strip() or result.stdout.strip() or "clear failed"
-            raise ApiError(HTTPStatus.BAD_GATEWAY, message)
+            raise ApiError(
+                HTTPStatus.BAD_GATEWAY,
+                friendly_device_error(message),
+                detail=message,
+                code="device_clear_failed",
+            )
+        self._last_error = None
         return {"state": "cleared"}
 
     def _reap_locked(self) -> None:
@@ -153,11 +191,32 @@ class PlaybackManager:
             return
         returncode = self._active.process.poll()
         if returncode is not None:
+            if returncode != 0:
+                raw_error = self._process_stderr(self._active.process)
+                message = friendly_device_error(raw_error or f"Route playback exited with code {returncode}")
+                self._last_error = {
+                    "code": "playback_failed",
+                    "message": message,
+                    "detail": raw_error,
+                }
             self._active = None
+
+    @staticmethod
+    def _process_stderr(process: subprocess.Popen[str]) -> str:
+        stderr = getattr(process, "stderr", None)
+        if stderr is None:
+            return ""
+        try:
+            return stderr.read().strip()
+        except Exception:
+            return ""
 
     def _status_locked(self) -> dict[str, Any]:
         if self._active is None:
-            return {"state": "idle"}
+            status: dict[str, Any] = {"state": "idle"}
+            if self._last_error:
+                status["error"] = self._last_error
+            return status
 
         now = time.monotonic()
         paused_seconds = self._active.total_paused_seconds
@@ -178,10 +237,19 @@ class PlaybackManager:
 
 
 class ApiError(Exception):
-    def __init__(self, status: HTTPStatus, message: str) -> None:
+    def __init__(
+        self,
+        status: HTTPStatus,
+        message: str,
+        *,
+        detail: str = "",
+        code: str = "request_failed",
+    ) -> None:
         super().__init__(message)
         self.status = status
         self.message = message
+        self.detail = detail
+        self.code = code
 
 
 class RouteRequestHandler(BaseHTTPRequestHandler):
@@ -200,7 +268,7 @@ class RouteRequestHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(target.stat().st_size))
             self.end_headers()
         except ApiError as error:
-            self._send_json({"error": error.message}, status=error.status)
+            self._send_error(error)
 
     def do_GET(self) -> None:
         try:
@@ -222,9 +290,16 @@ class RouteRequestHandler(BaseHTTPRequestHandler):
                 return
             self._serve_static(parsed.path)
         except ApiError as error:
-            self._send_json({"error": error.message}, status=error.status)
+            self._send_error(error)
         except Exception as error:
-            self._send_json({"error": str(error)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+            self._send_error(
+                ApiError(
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                    "The backend hit an unexpected error.",
+                    detail=str(error),
+                    code="internal_error",
+                )
+            )
 
     def do_POST(self) -> None:
         try:
@@ -248,9 +323,16 @@ class RouteRequestHandler(BaseHTTPRequestHandler):
                 return
             raise ApiError(HTTPStatus.NOT_FOUND, f"Unknown endpoint: {parsed.path}")
         except ApiError as error:
-            self._send_json({"error": error.message}, status=error.status)
+            self._send_error(error)
         except Exception as error:
-            self._send_json({"error": str(error)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+            self._send_error(
+                ApiError(
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                    "The backend hit an unexpected error.",
+                    detail=str(error),
+                    code="internal_error",
+                )
+            )
 
     def log_message(self, format: str, *args: Any) -> None:
         return
@@ -276,6 +358,16 @@ class RouteRequestHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(content)))
         self.end_headers()
         self.wfile.write(content)
+
+    def _send_error(self, error: ApiError) -> None:
+        self._send_json(
+            {
+                "error": error.message,
+                "errorCode": error.code,
+                "errorDetail": error.detail,
+            },
+            status=error.status,
+        )
 
 
 def route_payloads() -> list[dict[str, Any]]:

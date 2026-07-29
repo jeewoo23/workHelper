@@ -11,6 +11,8 @@ const state = {
   backend: {
     available: false,
     device: null,
+    deviceReport: null,
+    routes: [],
     playback: { state: "idle" },
     error: "",
     mode: "preview"
@@ -33,7 +35,7 @@ const pad = number => String(number).padStart(2, "0");
 const durationText = seconds => `${pad(Math.floor(seconds / 60))}:${pad(Math.floor(seconds % 60))}`;
 const destinationName = () => state.direction === "outbound" ? "L2" : "L1";
 const originName = () => state.direction === "outbound" ? "L1" : "L2";
-const routeId = () => state.direction === "outbound" ? "l1-to-l2" : "l2-to-l1";
+const routeId = () => backendRouteForDirection(state.direction)?.id || (state.direction === "outbound" ? "l1-to-l2" : "l2-to-l1");
 
 async function loadRoute() {
   try {
@@ -148,13 +150,13 @@ function renderShell() {
               <div class="route-list">
                 <button class="route-card selected" data-direction="outbound">
                   <span class="route-state"></span>
-                  <span class="route-copy"><strong>L1 → L2</strong><small>Outbound · 20 min</small></span>
-                  <span class="route-count mono">${state.outbound.length}</span>
+                  <span class="route-copy"><strong data-route-live="outbound-label">L1 → L2</strong><small data-route-live="outbound-meta">Outbound · 20 min</small></span>
+                  <span class="route-count mono" data-route-live="outbound-count">${state.outbound.length}</span>
                 </button>
                 <button class="route-card" data-direction="inbound">
                   <span class="route-state"></span>
-                  <span class="route-copy"><strong>L2 → L1</strong><small>Return · 20 min</small></span>
-                  <span class="route-count mono">${state.inbound.length}</span>
+                  <span class="route-copy"><strong data-route-live="inbound-label">L2 → L1</strong><small data-route-live="inbound-meta">Return · 20 min</small></span>
+                  <span class="route-count mono" data-route-live="inbound-count">${state.inbound.length}</span>
                 </button>
               </div>
 
@@ -298,6 +300,7 @@ function setDirection(direction) {
 
 async function initBackend() {
   await refreshBackendStatus();
+  await refreshBackendRoutes();
   window.setInterval(refreshBackendStatus, 1000);
 }
 
@@ -307,7 +310,12 @@ async function apiRequest(path, options = {}) {
     headers: { "Content-Type": "application/json", ...(options.headers || {}) }
   });
   const payload = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(payload.error || `Request failed (${response.status})`);
+  if (!response.ok) {
+    const error = new Error(payload.error || `Request failed (${response.status})`);
+    error.code = payload.errorCode || "";
+    error.detail = payload.errorDetail || "";
+    throw error;
+  }
   return payload;
 }
 
@@ -315,16 +323,34 @@ async function refreshBackendStatus() {
   try {
     const payload = await apiRequest("/api/status");
     state.backend.available = true;
+    state.backend.deviceReport = payload.device || null;
     state.backend.device = parseDevice(payload.device);
-    state.backend.error = "";
     state.backend.playback = payload.playback || { state: "idle" };
+    state.backend.error = state.backend.playback.error?.message || "";
     syncBackendPlayback();
   } catch (error) {
     state.backend.available = false;
     state.backend.device = null;
+    state.backend.deviceReport = null;
     state.backend.error = "";
     state.backend.playback = { state: "idle" };
   }
+  updateLiveState();
+}
+
+async function refreshBackendRoutes() {
+  if (!state.backend.available) {
+    updateRouteCards();
+    return;
+  }
+  try {
+    const payload = await apiRequest("/api/routes");
+    state.backend.routes = Array.isArray(payload.routes) ? payload.routes : [];
+  } catch (error) {
+    state.backend.routes = [];
+    state.backend.error = error.message;
+  }
+  updateRouteCards();
   updateLiveState();
 }
 
@@ -336,6 +362,57 @@ function parseDevice(report) {
   } catch (error) {
     return null;
   }
+}
+
+function deviceProbeMessage(report) {
+  if (!report || !report.device_probe_attempted) return "Run ./scripts/run_frontend.sh for live phone control.";
+  if (report.device_probe_ok) return "";
+  const output = report.device_probe_output || "";
+  if (/no usb-connected iphone/i.test(output)) {
+    return "No USB iPhone detected. Plug in the phone, unlock it, and tap Trust if prompted.";
+  }
+  if (/unable to connect to tunneld/i.test(output)) {
+    return "Developer tunnel is not running. Start tunneld, or reconnect and retry with userspace mode.";
+  }
+  if (/developer mode/i.test(output)) {
+    return "Enable Developer Mode on the iPhone, then reconnect it.";
+  }
+  return output || "Device probe failed. Reconnect and unlock the iPhone, then retry.";
+}
+
+function backendRouteForDirection(direction) {
+  return state.backend.routes.find(candidate => candidate.direction === direction);
+}
+
+function fallbackRouteMeta(direction) {
+  const points = direction === "outbound" ? state.outbound : state.inbound;
+  return {
+    id: direction === "outbound" ? "l1-to-l2" : "l2-to-l1",
+    label: direction === "outbound" ? "L1 to L2" : "L2 to L1",
+    direction,
+    pointCount: points.length,
+    durationSeconds: points.length > 1 ? Math.max(0, (points.at(-1).time - points[0].time) / 1000) : 0
+  };
+}
+
+function displayRouteLabel(label) {
+  return label.replace(/\s+to\s+/i, " → ");
+}
+
+function updateRouteCards() {
+  ["outbound", "inbound"].forEach(direction => {
+    const routeMeta = backendRouteForDirection(direction) || fallbackRouteMeta(direction);
+    const prefix = direction === "outbound" ? "Outbound" : "Return";
+    setRouteText(`${direction}-label`, displayRouteLabel(routeMeta.label));
+    setRouteText(`${direction}-meta`, `${prefix} · ${durationMinutes(routeMeta.durationSeconds)}`);
+    setRouteText(`${direction}-count`, String(routeMeta.pointCount));
+  });
+}
+
+function durationMinutes(seconds) {
+  if (!Number.isFinite(seconds) || seconds <= 0) return "—";
+  const minutes = Math.round(seconds / 60);
+  return `${minutes} min`;
 }
 
 function syncBackendPlayback() {
@@ -653,11 +730,15 @@ function updateLiveState() {
   const percent = Math.round(state.progress * 100);
   const backendPlayback = state.backend.playback || { state: "idle" };
   const device = state.backend.device;
+  const deviceMessage = deviceProbeMessage(state.backend.deviceReport);
   const deviceOnline = state.backend.available && !!device;
+  const backendError = state.backend.error;
   const status = state.backend.available && backendPlayback.state === "playing"
     ? `Phone traveling to ${destinationName()}`
     : state.backend.available && backendPlayback.state === "paused"
       ? "Phone route paused"
+      : backendError
+        ? "Backend needs attention"
       : state.playing
         ? `Previewing to ${destinationName()}`
         : state.progress >= 1
@@ -712,7 +793,7 @@ function updateLiveState() {
     : state.backend.available
       ? deviceOnline
         ? "Device controls are live"
-        : "Backend is running, but no USB iPhone is detected"
+        : deviceMessage || "Backend is running, but no USB iPhone is detected"
       : "Preview mode");
   setText("transport-title", state.backend.available ? "IPHONE TRANSPORT" : "PREVIEW TRANSPORT");
   setText("device-name", deviceOnline ? device.DeviceName || "Connected iPhone" : state.backend.available ? "No iPhone detected" : "Backend offline");
@@ -721,10 +802,10 @@ function updateLiveState() {
   setText("device-detail", deviceOnline
     ? `${device.ConnectionType || "USB"} · ${device.Identifier || "paired device"}`
     : state.backend.available
-      ? "Connect and unlock the phone, then refresh status."
+      ? deviceMessage || "Connect and unlock the phone, then refresh status."
       : "Run ./scripts/run_frontend.sh for live phone control.");
 
-  document.querySelectorAll(".status-dot").forEach(dot => {
+  document.querySelectorAll(".status-pill:not(.connection-pill) .status-dot, .control-state .status-dot").forEach(dot => {
     dot.classList.toggle("playing", state.playing);
     dot.classList.toggle("complete", state.progress >= 1);
   });
@@ -755,6 +836,12 @@ function updateLiveState() {
 
 function setText(key, value) {
   document.querySelectorAll(`[data-live="${key}"]`).forEach(node => {
+    node.textContent = value;
+  });
+}
+
+function setRouteText(key, value) {
+  document.querySelectorAll(`[data-route-live="${key}"]`).forEach(node => {
     node.textContent = value;
   });
 }

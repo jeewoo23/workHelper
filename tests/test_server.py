@@ -1,9 +1,10 @@
 import signal
 import subprocess
+from io import StringIO
 
 import pytest
 
-from route_controller.server import ApiError, PlaybackManager, route_payload
+from route_controller.server import ApiError, PlaybackManager, friendly_device_error, route_payload
 
 
 class FakeProcess:
@@ -16,6 +17,7 @@ class FakeProcess:
         self.signals = []
         self.terminated = False
         self.killed = False
+        self.stderr = StringIO("")
         FakeProcess.next_pid += 1
 
     def poll(self):
@@ -89,3 +91,36 @@ def test_playback_manager_owns_one_process(monkeypatch) -> None:
     stopped = manager.stop(clear_location=True)
     assert stopped["state"] == "idle"
     assert processes[0].terminated is True
+
+
+def test_friendly_device_error_explains_tunneld_recovery() -> None:
+    message = friendly_device_error(
+        "ERROR Unable to connect to Tunneld. You can start one using: "
+        "sudo python3 -m pymobiledevice3 remote tunneld"
+    )
+
+    assert "developer tunnel is not running" in message.lower()
+    assert "tunneld" in message
+
+
+def test_failed_playback_status_keeps_friendly_error(monkeypatch) -> None:
+    processes = []
+
+    def fake_popen(arguments, **kwargs):
+        process = FakeProcess(arguments, **kwargs)
+        process.stderr = StringIO("No USB-connected iPhone found")
+        processes.append(process)
+        return process
+
+    monkeypatch.setattr("route_controller.server.resolve_executable", lambda _: "pymobiledevice3")
+    monkeypatch.setattr("route_controller.server.subprocess.Popen", fake_popen)
+
+    manager = PlaybackManager(userspace=True)
+    manager.start("l1-to-l2")
+    processes[0].returncode = 1
+
+    status = manager.status()
+
+    assert status["state"] == "idle"
+    assert status["error"]["code"] == "playback_failed"
+    assert "No USB iPhone was detected" in status["error"]["message"]
