@@ -19,14 +19,14 @@
 }
 
 * { box-sizing: border-box; }
-html, body { min-width: 320px; min-height: 100%; }
-body { margin: 0; color: var(--text); background: var(--canvas); }
+html, body { min-width: 320px; height: 100%; min-height: 100%; }
+body { margin: 0; color: var(--text); background: var(--canvas); overflow: hidden; }
 button { color: inherit; font: inherit; cursor: pointer; }
 button:focus-visible { outline: 1px solid var(--blue); outline-offset: 2px; }
 h1, h2, p { margin-top: 0; }
 .mono { font-family: "IBM Plex Mono", "SFMono-Regular", Consolas, monospace; }
 
-.app-shell { min-height: 100vh; }
+.app-shell { height: 100vh; overflow: hidden; }
 .product-mark { display: flex; align-items: center; gap: 12px; padding: 0 12px; }
 .product-icon {
   position: relative;
@@ -56,12 +56,13 @@ h1, h2, p { margin-top: 0; }
 .product-mark strong { color: #e4ebf1; font-size: 13px; font-weight: 600; letter-spacing: .2em; }
 .product-mark span:last-child { color: var(--dim); font-size: 9px; letter-spacing: .25em; }
 
-.mission-main { min-width: 0; }
+.mission-main { display: flex; flex-direction: column; height: 100vh; min-width: 0; min-height: 0; }
 .mission-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  min-height: 72px;
+  flex: 0 0 64px;
+  min-height: 64px;
   padding: 0 max(24px, calc((100vw - 1600px) / 2));
   border-bottom: 1px solid var(--border-soft);
 }
@@ -110,31 +111,32 @@ h1, h2, p { margin-top: 0; }
 }
 .connection-pill.backend-only .status-dot { background: var(--amber); }
 
-.mission-content { max-width: 1648px; margin: 0 auto; padding: 18px 24px; }
+.mission-content { flex: 1; width: 100%; max-width: 1648px; min-height: 0; margin: 0 auto; padding: 12px 20px; }
 .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; }
 
 .operations-grid {
   display: grid;
   grid-template-columns: 250px minmax(420px, 1fr) 300px;
-  gap: 16px;
-  min-height: calc(100vh - 108px);
+  gap: 12px;
+  height: 100%;
+  min-height: 0;
 }
 .panel-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  min-height: 47px;
-  padding: 0 14px;
+  min-height: 40px;
+  padding: 0 12px;
   border-bottom: 1px solid var(--border);
 }
 .panel-header > span { color: var(--muted); font-size: 9px; letter-spacing: .19em; }
 .panel-header > b { color: var(--dim); font: 400 9px "IBM Plex Mono", monospace; }
-.route-panel { display: flex; flex-direction: column; overflow: hidden; }
+.route-panel { display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
 .device-card {
   display: grid;
-  gap: 12px;
-  margin: 13px 13px 0;
-  padding: 13px;
+  gap: 9px;
+  margin: 10px 10px 0;
+  padding: 10px;
   background:
     radial-gradient(circle at 12% 0%, rgba(67, 162, 216, .14), transparent 42%),
     var(--panel-deep);
@@ -168,7 +170,7 @@ h1, h2, p { margin-top: 0; }
 }
 .device-card.backend-only .device-indicator { background: var(--amber); }
 .device-card p {
-  margin: 0 0 5px;
+  margin: 0 0 4px;
   color: var(--dim);
   font-size: 8px;
   letter-spacing: .19em;
@@ -183,11 +185,11 @@ h1, h2, p { margin-top: 0; }
 .device-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 7px;
+  gap: 6px;
 }
 .device-grid span {
   min-width: 0;
-  padding: 8px;
+  padding: 7px;
   background: rgba(9, 15, 19, .55);
   border: 1px solid var(--border-soft);
   border-radius: 5px;
@@ -211,17 +213,17 @@ h1, h2, p { margin-top: 0; }
   color: var(--muted);
   font-size: 9px;
   font-style: normal;
-  line-height: 1.45;
+  line-height: 1.35;
 }
-.route-list { display: grid; gap: 8px; padding: 13px; }
+.route-list { display: grid; gap: 7px; padding: 10px; }
 .route-card {
   position: relative;
   display: grid;
   grid-template-columns: 8px 1fr auto;
   gap: 9px;
   align-items: start;
-  min-height: 61px;
-  padding: 13px 11px;
+  min-height: 52px;
+  padding: 10px;
   text-align: left;
   background: transparent;
   border: 1px solid transparent;
@@ -242,19 +244,19 @@ h1, h2, p { margin-top: 0; }
 .route-card.selected .route-copy strong { color: #62b8e6; }
 .route-copy small { color: var(--dim); font-size: 9px; }
 .route-count { color: var(--muted); font-size: 9px; }
-.coordinate-readout { margin: 0 13px 13px; padding: 13px; border-top: 1px solid var(--border-soft); }
-.coordinate-readout { margin-top: 6px; }
+.coordinate-readout { margin: 0 10px 10px; padding: 10px; border-top: 1px solid var(--border-soft); }
+.coordinate-readout { margin-top: 4px; }
 .coordinate-readout p, .control-section p {
-  margin: 0 0 12px;
+  margin: 0 0 9px;
   color: var(--dim);
   font-size: 8px;
   letter-spacing: .19em;
 }
 .coordinate-readout div {
   display: grid;
-  gap: 5px;
-  margin-bottom: 12px;
-  padding: 9px;
+  gap: 4px;
+  margin-bottom: 8px;
+  padding: 7px;
   background: var(--panel-deep);
   border: 1px solid var(--border-soft);
   border-radius: 5px;
@@ -270,7 +272,7 @@ h1, h2, p { margin-top: 0; }
 }
 .location-button {
   width: 100%;
-  min-height: 32px;
+  min-height: 28px;
   margin-top: 1px;
   color: #f2c14e;
   border-color: rgba(242, 193, 78, .36);
@@ -282,14 +284,14 @@ h1, h2, p { margin-top: 0; }
 }
 .physical-readout em {
   display: block;
-  margin-top: 9px;
+  margin-top: 7px;
   color: var(--muted);
   font-size: 9px;
   font-style: normal;
-  line-height: 1.45;
+  line-height: 1.35;
 }
 
-.map-card { position: relative; min-width: 0; min-height: calc(100vh - 108px); overflow: hidden; background: #101820; }
+.map-card { position: relative; min-width: 0; min-height: 0; overflow: hidden; background: #101820; }
 .map-titlebar {
   position: absolute;
   z-index: 3;
@@ -299,14 +301,14 @@ h1, h2, p { margin-top: 0; }
   display: flex;
   align-items: center;
   justify-content: space-between;
-  min-height: 47px;
-  padding: 0 14px;
+  min-height: 40px;
+  padding: 0 12px;
   background: rgba(16, 24, 32, .88);
   border-bottom: 1px solid rgba(42, 57, 71, .85);
   backdrop-filter: blur(12px);
 }
 .map-titlebar span, .map-titlebar b { color: var(--dim); font-size: 8px; font-weight: 500; letter-spacing: .2em; }
-#cesiumMap { position: absolute; inset: 47px 0 0; }
+#cesiumMap { position: absolute; inset: 40px 0 0; }
 #cesiumMap, .cesium-widget, .cesium-widget canvas { width: 100%; height: 100%; }
 .cesium-viewer, .cesium-viewer-cesiumWidgetContainer { width: 100%; height: 100%; }
 .cesium-viewer-bottom { right: 8px; bottom: 6px; left: auto; }
@@ -320,7 +322,7 @@ h1, h2, p { margin-top: 0; }
 .map-actions {
   position: absolute;
   z-index: 3;
-  top: 59px;
+  top: 50px;
   right: 12px;
   display: flex;
   flex-wrap: wrap;
@@ -391,14 +393,14 @@ h1, h2, p { margin-top: 0; }
   transform: translate(-50%, -50%);
 }
 
-.control-panel { display: flex; flex-direction: column; min-width: 0; overflow: hidden; }
+.control-panel { display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; }
 .control-state { display: flex !important; gap: 6px; align-items: center; color: var(--amber) !important; }
-.control-section { padding: 16px 14px; border-bottom: 1px solid var(--border-soft); }
-.journey-display { display: grid; grid-template-columns: 42px 1fr 42px; gap: 8px; align-items: center; }
+.control-section { padding: 12px; border-bottom: 1px solid var(--border-soft); }
+.journey-display { display: grid; grid-template-columns: 36px 1fr 36px; gap: 8px; align-items: center; }
 .journey-display > strong {
   display: grid;
-  width: 42px;
-  height: 42px;
+  width: 36px;
+  height: 36px;
   place-items: center;
   color: #dce4eb;
   background: var(--panel-deep);
@@ -429,7 +431,7 @@ h1, h2, p { margin-top: 0; }
 }
 .button-row { display: grid; grid-template-columns: 1fr auto; gap: 7px; }
 .primary, .secondary {
-  min-height: 37px;
+  min-height: 34px;
   border-radius: 5px;
   font: 500 9px "IBM Plex Mono", monospace;
 }
@@ -452,15 +454,15 @@ h1, h2, p { margin-top: 0; }
 .secondary:hover { background: rgba(242, 86, 80, .08); }
 .clear-button {
   width: 100%;
-  margin-top: 8px;
+  margin-top: 7px;
   color: var(--muted);
   border-color: var(--border);
 }
 .clear-button:hover { color: #dce6ee; background: rgba(255, 255, 255, .03); border-color: var(--blue); }
 .backend-note {
   min-height: 14px;
-  margin: 9px 0 0 !important;
-  padding: 8px 9px;
+  margin: 7px 0 0 !important;
+  padding: 7px 8px;
   color: #9fb0bf !important;
   background: rgba(9, 15, 19, .42);
   border: 1px solid var(--border-soft);
@@ -469,14 +471,14 @@ h1, h2, p { margin-top: 0; }
   text-transform: none;
 }
 .play-icon { font-size: 8px; }
-.progress-label { display: flex; justify-content: space-between; margin-bottom: 8px; }
+.progress-label { display: flex; justify-content: space-between; margin-bottom: 7px; }
 .progress-label > span { color: var(--dim); font-size: 8px; letter-spacing: .16em; }
 .progress-label strong { color: var(--blue); font-size: 9px; font-weight: 400; }
 .progress { height: 4px; overflow: hidden; background: #1f2b36; border-radius: 99px; }
 .progress > div { width: 0; height: 100%; background: var(--blue); border-radius: inherit; transition: width .1s linear; }
-.time-pair { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 14px; }
+.time-pair { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; margin-top: 10px; }
 .time-pair span,
-.time-pair label { display: grid; gap: 5px; padding: 9px; background: var(--panel-deep); border: 1px solid var(--border-soft); border-radius: 5px; }
+.time-pair label { display: grid; gap: 4px; padding: 7px; background: var(--panel-deep); border: 1px solid var(--border-soft); border-radius: 5px; }
 .time-pair small { color: var(--dim); font-size: 7px; letter-spacing: .14em; }
 .time-pair strong { color: #c7d1da; font-size: 12px; font-weight: 400; }
 .time-pair input {
@@ -500,7 +502,7 @@ h1, h2, p { margin-top: 0; }
 }
 .segmented { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; }
 .segmented button {
-  min-height: 31px;
+  min-height: 28px;
   color: var(--muted);
   background: var(--panel-deep);
   border: 1px solid var(--border-soft);
@@ -536,6 +538,11 @@ h1, h2, p { margin-top: 0; }
   .control-panel { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(4, 1fr); }
   .control-panel .panel-header { grid-column: 1 / -1; }
   .control-panel .control-section { border-right: 1px solid var(--border-soft); border-bottom: 0; }
+}
+
+@media (max-height: 700px) {
+  .route-panel,
+  .control-panel { overflow: auto; }
 }
 
 @media (max-width: 720px) {
