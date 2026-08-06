@@ -22,6 +22,32 @@
       "trackPath": "routes/tracks/route_L2_to_L1.track.gpx",
       "createdAt": "2026-07-28T00:00:00Z",
       "bundled": true
+    },
+    {
+      "id": "generated-map-origin-to-map-destination",
+      "label": "Map origin to Map destination",
+      "direction": "custom",
+      "originLabel": "Map origin",
+      "destinationLabel": "Map destination",
+      "trackPath": "routes/generated/Map-origin-to-Map-destination.track.gpx",
+      "createdAt": "2026-07-29T17:05:17Z",
+      "bundled": false,
+      "sourcePath": "routes/imports/Map-origin-to-Map-destination.gpx",
+      "timingMode": "source",
+      "estimatedDurationSeconds": 10.1
+    },
+    {
+      "id": "generated-map-origin-to-map-destination-2",
+      "label": "Map origin to Map destination",
+      "direction": "custom",
+      "originLabel": "Map origin",
+      "destinationLabel": "Map destination",
+      "trackPath": "routes/generated/Map-origin-to-Map-destination-2.track.gpx",
+      "createdAt": "2026-07-31T01:47:22Z",
+      "bundled": false,
+      "sourcePath": "routes/imports/Map-origin-to-Map-destination-2.gpx",
+      "timingMode": "source",
+      "estimatedDurationSeconds": 8.8
     }
   ]
 }

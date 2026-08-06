@@ -248,15 +248,17 @@ The current [`pymobiledevice3` GPX playback implementation](https://github.com/d
 9. Confirm each directional duration is exactly 1,200 seconds.
 10. Interpolate playback tracks to half-second samples for smooth device movement.
 
-### Future generated-route timing
+### Generated-route timing
 
 For a route without timestamps:
 
-1. Obtain the route polyline and expected travel duration.
-2. Calculate cumulative distance along the polyline.
-3. Assign each point a timestamp proportional to cumulative distance.
-4. Optionally resample the polyline so points are neither extremely dense nor far apart.
-5. Use UTC ISO 8601 timestamps.
+1. Sample distance-spaced anchors from the route polyline.
+2. Obtain road-leg durations from the configured routing provider.
+3. Map the provider durations back onto the original geometry.
+4. Scale the relative speed profile when a custom duration was requested.
+5. Fall back to cumulative-distance timing only when a custom duration exists.
+6. Interpolate the resulting profile into half-second playback points.
+7. Use UTC ISO 8601 timestamps.
 
 Do not ask an LLM to assign coordinates or timing.
 
@@ -433,6 +435,8 @@ GET /api/status
 GET /api/devices
 GET /api/routes
 GET /api/routes/{routeId}
+GET /api/routes/imports
+GET /api/routes/imports/{filename}
 ```
 
 ### Control operations
@@ -442,17 +446,116 @@ POST /api/routes/{routeId}/start
 POST /api/playback/pause
 POST /api/playback/resume
 POST /api/playback/stop
+POST /api/location/set
 POST /api/location/clear
 ```
 
-### Route creation, later phase
+`POST /api/location/set` accepts numeric `latitude` and `longitude` fields,
+rejects out-of-range coordinates and active route playback, then activates the
+static coordinate on the connected iPhone. The controller retains that static
+position in its runtime status until route playback begins or location is
+cleared. The Coordinates panel can also enter a one-click Cesium selection
+mode. The selected point remains a frontend draft and map marker until the user
+explicitly presses **Activate**.
+
+### Route creation
 
 ```text
 POST /api/routes/import-gpx
+POST /api/routes/imports/{filename}/prepare
+DELETE /api/routes/imports/{filename}
 POST /api/routes/from-google-maps-link
 POST /api/routes/from-directions
 POST /api/routes/from-prompt
 ```
+
+`POST /api/routes/import-gpx` is implemented as a JSON-first endpoint. Its
+request body contains `filename` and `content` strings. It accepts a single GPX
+track, route, or waypoint collection, with or without timestamps, and saves the
+validated source under `routes/imports/`. The response returns geometry
+metadata for the frontend preview. The Phase 3C frontend reads the same local
+file, uploads it to this endpoint, lists saved imports in the Import GPX
+accordion, and renders the selected geometry in Cesium. The import-list and
+detail endpoints rebuild their metadata from files in `routes/imports/`, so
+the list survives page refreshes without browser storage. Imported routes
+remain preview-only until the user explicitly prepares a timed playback track.
+
+Phase 3D implements `POST /api/routes/imports/{filename}/prepare`. The request
+accepts an optional playback duration in seconds, a timing mode, and an optional
+label. Fully timed sources retain their relative timing profile while being
+scaled when a custom duration is selected. The result is normalized into one
+`trk/trkseg`, resampled at fixed half-second intervals with a final partial
+interval when needed, saved under
+`routes/generated/`, and upserted into the route registry as a custom route.
+The frontend enables phone playback only after this preparation succeeds.
+
+Phase 3E replaces uniform timing as the default for untimed imports. The timing
+module presents one interface that returns a complete monotonic timing plan.
+Its production OSRM adapter samples at most 90 distance-spaced anchors from the
+GPX, requests driving duration for every resulting road leg, and maps those leg
+durations back onto the original geometry. This retains the imported path while
+allowing highways, ramps, and surface streets to receive different relative
+speeds. A requested custom duration scales the full profile rather than
+flattening it. The import panel discloses that those sampled coordinates leave
+the Mac for the configured OSRM endpoint.
+
+Timing modes returned in route metadata:
+
+- `source`: every GPX point had a valid timestamp, so relative source timing was
+  preserved.
+- `route-aware`: OSRM supplied the road-leg duration profile.
+- `uniform`: cumulative-distance timing was used as an explicit or offline
+  fallback.
+
+The frontend's **Use Best Available Travel Time** option leaves duration
+selection to the source timestamps or provider ETA. If the import is untimed
+and the provider is unavailable, best-available preparation fails with an
+actionable message instead of silently inventing an ETA. The user can uncheck
+the option, provide a custom duration, and prepare with a clearly labeled
+uniform fallback.
+
+`DELETE /api/routes/imports/{filename}` removes the exact validated import,
+any generated playback track registered from that source, and the matching
+custom route-registry entry. It refuses deletion while the matching route is
+active. The frontend requires an explicit irreversible-delete confirmation and
+uses backend capability metadata to distinguish a stale pre-3E process from a
+route-preparation error.
+
+Phase 3F implements `POST /api/routes/from-directions`. The request accepts a
+validated numeric origin and destination, endpoint labels, a route name, and
+the `driving` profile. The OSRM directions adapter requests full GeoJSON road
+geometry plus edge-duration annotations. The backend validates the provider
+response, writes a timed source GPX under `routes/imports/`, and returns a
+Cesium-ready preview with distance and provider ETA. It does not register a
+playable route: the user must review the preview and use the existing Prepare
+action before phone playback is enabled.
+
+The frontend Route Builder can fill either endpoint from the current simulated
+position, browser-provided Mac physical location, manual decimal coordinates,
+or a Cesium map click. Simulated and physical positions remain explicitly
+named. Selected coordinates are sent only to the configured OSRM endpoint and
+are not written to application logs. Generated source GPX files retain
+endpoint names and relative provider timing, so custom preparation durations
+scale the road-speed profile instead of flattening it.
+
+Phase 3G implements `POST /api/routes/from-google-maps-link`. It accepts a full
+coordinate-based Google Maps directions URL or a Google-owned short link.
+Short-link expansion follows at most five redirects, permits only Google-owned
+hosts, and never fetches arbitrary submitted hosts. The parser accepts the
+official `api=1&origin=<lat,lon>&destination=<lat,lon>` form and coordinate
+endpoint paths used by shared directions links.
+
+The link provides semantic endpoints, not trusted route geometry. Central Blue
+passes the extracted coordinates through the existing OSRM directions module,
+saves the timed GPX preview, and requires the same explicit Prepare step before
+phone playback. Links containing only place names or addresses return a clear
+`google_maps_geocoding_required` error because named-place resolution belongs
+to Phase 4.
+
+Generated-route metadata is stored in a local JSON sidecar beside each imported
+GPX. Provider, distance, ETA, source type, endpoint labels, and exact requested
+coordinates therefore survive page refreshes. Deleting an import also deletes
+its sidecar.
 
 ### Live updates
 
@@ -534,17 +637,20 @@ Each error should include one recovery action.
 
 Our application should reproduce the workflow without automating or scraping the Maps to GPX website. Its [mobile-development page](https://mapstogpx.com/mobiledev.php) explicitly reports automated-traffic costs and does not document a public automation API.
 
-Proposed flow:
+Implemented Phase 3 flow:
 
 1. Accept a full or shortened Google Maps directions URL.
-2. Expand a shortened link safely.
-3. Parse origin, destination, intermediate stops, and travel mode when available.
-4. Send those semantic inputs to an authorized routing provider.
+2. Expand Google-owned shortened links with a redirect host allowlist.
+3. Parse coordinate origin and destination.
+4. Send those semantic inputs to the configured OSRM routing provider.
 5. Obtain a road-following polyline.
 6. Preview the route.
-7. Generate timed Xcode and `pymobiledevice3` GPX variants.
+7. Save the timed source GPX and prepare a half-second `pymobiledevice3` track
+   only after explicit review.
 
 Do not assume a shared Google Maps URL contains the complete detailed route geometry.
+Named-place geocoding, intermediate stops, and natural-language endpoint
+resolution remain Phase 4 work.
 
 ### Routing-engine choices
 
@@ -738,12 +844,13 @@ Exit criterion: No terminal interaction is needed after prerequisites are runnin
 
 ### Phase 3 — route import and generation
 
-1. Import arbitrary GPX.
-2. Show a map preview.
-3. Validate and convert formats.
-4. Accept origin/destination.
-5. Add a routing provider.
-6. Add Google Maps directions-link parsing.
+1. Import arbitrary GPX. **Implemented**
+2. Show a map preview. **Implemented**
+3. Validate and convert formats. **Implemented**
+4. Add route-aware timing for imported GPX. **Implemented**
+5. Accept origin/destination. **Implemented**
+6. Generate road-following geometry through the routing provider. **Implemented**
+7. Add Google Maps directions-link parsing. **Implemented**
 
 Exit criterion: A user can create, preview, save, and play a new route.
 

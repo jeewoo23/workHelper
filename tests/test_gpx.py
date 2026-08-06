@@ -1,4 +1,4 @@
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from math import atan2, cos, radians, sin, sqrt
 from pathlib import Path
 from xml.etree import ElementTree as ET
@@ -9,18 +9,34 @@ from route_controller.gpx import (
     GpxValidationError,
     RoutePoint,
     generate_directional_tracks,
+    inspect_gpx_content,
     interpolate_points,
     parse_track,
+    prepare_gpx_playback,
+    prepare_gpx_playback_result,
     parse_xcode_waypoints,
     split_round_trip,
     summarize,
     validate_points,
 )
+from route_controller.timing import RoadTimingEstimate
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "routes" / "source" / "route_final.gpx"
 HIGHWAY_START = (37.40382498413415, -122.02724763671414)
 HIGHWAY_END = (37.3920662232116, -122.09474709677077)
+UNTIMED_TRACK = """<?xml version="1.0" encoding="UTF-8"?>
+<gpx version="1.1" creator="MapsToGPX"
+     xmlns="http://www.topografix.com/GPX/1/1">
+  <trk>
+    <name>Imported drive</name>
+    <trkseg>
+      <trkpt lat="37.3835546" lon="-122.1371287"/>
+      <trkpt lat="37.41584954048625" lon="-122.03492834466675"/>
+    </trkseg>
+  </trk>
+</gpx>
+"""
 
 
 def _distance_meters(
@@ -175,3 +191,173 @@ def test_split_requires_exactly_one_named_midpoint() -> None:
 
     with pytest.raises(GpxValidationError, match="exactly one"):
         split_round_trip(points, split_name="missing")
+
+
+def test_import_inspection_accepts_untimed_track_geometry() -> None:
+    summary = inspect_gpx_content(UNTIMED_TRACK)
+
+    assert summary.name == "Imported drive"
+    assert summary.geometry_type == "track"
+    assert summary.point_count == 2
+    assert summary.timestamped_point_count == 0
+    assert summary.segment_count == 1
+    assert summary.start == (37.3835546, -122.1371287)
+    assert summary.end == (37.41584954048625, -122.03492834466675)
+
+
+def test_import_inspection_rejects_unsafe_xml_declarations() -> None:
+    content = """<?xml version="1.0"?>
+    <!DOCTYPE gpx [<!ENTITY route "unsafe">]>
+    <gpx version="1.1"><wpt lat="1" lon="2"/><wpt lat="3" lon="4"/></gpx>
+    """
+
+    with pytest.raises(GpxValidationError, match="not allowed"):
+        inspect_gpx_content(content)
+
+
+def test_untimed_import_can_be_prepared_as_half_second_playback() -> None:
+    started_at = datetime(2026, 7, 28, 12, 0, tzinfo=timezone.utc)
+
+    name, points = prepare_gpx_playback(
+        UNTIMED_TRACK,
+        duration_seconds=120,
+        interpolate_seconds=0.5,
+        start_time=started_at,
+    )
+
+    assert name == "Imported drive"
+    assert points[0].time == started_at
+    assert points[0].latitude == 37.3835546
+    assert points[-1].latitude == 37.41584954048625
+    assert summarize(name, points).duration_seconds == 120
+    assert len(points) == 241
+    assert points[1].time - points[0].time == timedelta(seconds=0.5)
+
+
+def test_timed_import_preserves_relative_timing_when_rescaled() -> None:
+    content = """<?xml version="1.0"?>
+    <gpx version="1.1">
+      <trk><name>Timed route</name><trkseg>
+        <trkpt lat="1" lon="1"><time>2026-01-01T12:00:00Z</time></trkpt>
+        <trkpt lat="2" lon="2"><time>2026-01-01T12:00:10Z</time></trkpt>
+        <trkpt lat="3" lon="3"><time>2026-01-01T12:00:30Z</time></trkpt>
+      </trkseg></trk>
+    </gpx>
+    """
+    started_at = datetime(2026, 7, 28, 12, 0, tzinfo=timezone.utc)
+
+    _, points = prepare_gpx_playback(
+        content,
+        duration_seconds=60,
+        interpolate_seconds=None,
+        start_time=started_at,
+    )
+
+    assert points[1].time - points[0].time == timedelta(seconds=20)
+    assert points[2].time - points[0].time == timedelta(seconds=60)
+
+
+def test_dense_timed_import_is_resampled_to_strict_half_seconds() -> None:
+    content = SOURCE.read_text(encoding="utf-8")
+    started_at = datetime(2026, 7, 28, 12, 0, tzinfo=timezone.utc)
+
+    prepared = prepare_gpx_playback_result(
+        content,
+        duration_seconds=10,
+        interpolate_seconds=0.5,
+        start_time=started_at,
+        timing_mode="source",
+    )
+
+    assert len(prepared.points) == 21
+    assert prepared.points[0].time == started_at
+    assert prepared.points[-1].time == started_at + timedelta(seconds=10)
+    assert prepared.points[0].latitude == pytest.approx(37.3835546)
+    assert prepared.points[-1].latitude == pytest.approx(37.3835546)
+    assert all(
+        second.time - first.time == timedelta(seconds=0.5)
+        for first, second in zip(prepared.points, prepared.points[1:])
+    )
+
+
+def test_duplicate_source_timestamps_do_not_reach_prepared_track() -> None:
+    content = """<?xml version="1.0"?>
+    <gpx version="1.1">
+      <trk><name>Duplicate source time</name><trkseg>
+        <trkpt lat="37.0" lon="-122.0">
+          <time>2026-01-01T12:00:00Z</time>
+        </trkpt>
+        <trkpt lat="37.0001" lon="-122.0001">
+          <time>2026-01-01T12:00:00Z</time>
+        </trkpt>
+        <trkpt lat="37.0002" lon="-122.0002">
+          <time>2026-01-01T12:00:02Z</time>
+        </trkpt>
+      </trkseg></trk>
+    </gpx>
+    """
+
+    prepared = prepare_gpx_playback_result(
+        content,
+        duration_seconds=10,
+        interpolate_seconds=0.5,
+        timing_mode="source",
+    )
+
+    assert len(prepared.points) == 21
+    assert all(
+        second.time > first.time
+        for first, second in zip(prepared.points, prepared.points[1:])
+    )
+
+
+def test_untimed_import_uses_route_aware_segment_profile() -> None:
+    content = """<?xml version="1.0"?>
+    <gpx version="1.1">
+      <trk><name>Road profile</name><trkseg>
+        <trkpt lat="37.0" lon="-122.00"/>
+        <trkpt lat="37.0" lon="-121.99"/>
+        <trkpt lat="37.0" lon="-121.98"/>
+      </trkseg></trk>
+    </gpx>
+    """
+
+    class FakeProvider:
+        name = "Test Roads"
+
+        def estimate(self, points):
+            return RoadTimingEstimate(
+                provider=self.name,
+                segment_durations_seconds=(10.0, 30.0),
+                estimated_duration_seconds=40.0,
+                anchor_count=3,
+            )
+
+    prepared = prepare_gpx_playback_result(
+        content,
+        duration_seconds=80,
+        interpolate_seconds=None,
+        timing_provider=FakeProvider(),
+    )
+
+    assert prepared.timing.mode == "route-aware"
+    assert prepared.timing.provider == "Test Roads"
+    assert prepared.points[1].time - prepared.points[0].time == timedelta(
+        seconds=20
+    )
+    assert prepared.points[2].time - prepared.points[1].time == timedelta(
+        seconds=60
+    )
+
+    resampled = prepare_gpx_playback_result(
+        content,
+        duration_seconds=80,
+        interpolate_seconds=0.5,
+        start_time=datetime(2026, 7, 28, 12, 0, tzinfo=timezone.utc),
+        timing_provider=FakeProvider(),
+    )
+    assert len(resampled.points) == 161
+    assert resampled.points[40].longitude == pytest.approx(-121.99)
+    assert resampled.points[40].time - resampled.points[0].time == timedelta(
+        seconds=20
+    )
