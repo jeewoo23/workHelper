@@ -95,6 +95,23 @@ def test_set_arguments_can_request_userspace_tunnel_before_coordinates() -> None
     ]
 
 
+def test_all_location_commands_target_the_same_udid(tmp_path: Path) -> None:
+    outbound, _ = generate_directional_tracks(SOURCE, tmp_path)
+    udid = "00008110-TEST-IPAD"
+
+    play = play_arguments(
+        "pymobiledevice3", outbound, userspace=True, udid=udid
+    )
+    clear = clear_arguments("pymobiledevice3", userspace=True, udid=udid)
+    static = set_arguments(
+        "pymobiledevice3", 37.3, -122.1, userspace=True, udid=udid
+    )
+
+    assert play[5:8] == ["--userspace", "--udid", udid]
+    assert clear[5:] == ["--userspace", "--udid", udid]
+    assert static[5:9] == ["--userspace", "--udid", udid, "--"]
+
+
 def test_play_defaults_to_dry_run_without_installed_tool(tmp_path: Path) -> None:
     outbound, _ = generate_directional_tracks(SOURCE, tmp_path)
     result = play_route(outbound, executable="pymobiledevice3", execute=False)

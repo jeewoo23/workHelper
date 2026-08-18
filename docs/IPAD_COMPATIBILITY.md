@@ -1,8 +1,17 @@
 # Physical iPad compatibility exploration
 
-**Status:** Research and implementation plan; no application code changed  
-**Date:** August 5, 2026  
+**Status:** Device-targeting implementation complete; physical iPad verification pending
+
+**Date:** Updated August 17, 2026
+
 **Current device dependency:** `pymobiledevice3` 9.40.0
+
+> **Implementation update:** Central Blue now uses USB-only structured device
+> discovery, recognizes iPhone and iPad metadata, auto-selects one compatible
+> device or requires an explicit choice when several are present, and passes the
+> selected UDID to static set, route play, and clear. The initial enforced scope
+> is iOS/iPadOS 17.4 or later. The physical acceptance test below remains the
+> final release gate.
 
 ## Executive conclusion
 
@@ -65,7 +74,11 @@ protocol to work on iPad. They do not replace a test on the intended iPad model
 and iPadOS build, because this is an undocumented Apple developer service being
 used through a third-party implementation.
 
-## Current application audit
+## Original application audit (August 5, before implementation)
+
+The gaps recorded in this section motivated the August 17 implementation
+summarized above. They are retained as design history; the physical acceptance
+test remains outstanding.
 
 ### What already works unchanged
 
@@ -144,9 +157,18 @@ it requires a restart and passcode confirmation. See
 [trust instructions][apple-trust], and
 [Developer Mode instructions][apple-developer-mode].
 
-If Developer Mode is absent or the device is not fully paired, use Xcode's
-Device Hub with the cable connected. Apple documents cable pairing for physical
-devices and surfaces device issues in that UI. See
+If Developer Mode is absent, first pair the unlocked iPad and ask
+`pymobiledevice3` to reveal the setting without requiring Xcode:
+
+```bash
+uv run --extra device pymobiledevice3 lockdown pair
+uv run --extra device pymobiledevice3 amfi developer-mode-status
+uv run --extra device pymobiledevice3 amfi reveal-developer-mode
+```
+
+Then enable **Settings > Privacy & Security > Developer Mode**, restart, and
+confirm the post-restart prompt. If pairing or revealing the setting still
+fails, Xcode's Device Hub is a fallback that can surface device issues. See
 [Managing devices in Device Hub][apple-device-hub].
 
 “USB-connected” describes the physical attachment, not necessarily every
@@ -165,7 +187,7 @@ CLI guide pairs Developer Mode with mounting the Developer Disk Image or
 personalized image:
 
 ```bash
-uv run pymobiledevice3 mounter auto-mount
+uv run --extra device pymobiledevice3 mounter auto-mount
 ```
 
 See the upstream [Developer Mode and DDI recipe][pmd-recipes]. Mounting may
@@ -207,7 +229,7 @@ is required, show the exact user-run command and wait for the user to start it.
 The app's current product promise is a tethered device, so discovery should run:
 
 ```bash
-uv run pymobiledevice3 usbmux list --usb
+uv run --extra device pymobiledevice3 usbmux list --usb
 ```
 
 Upstream documents that plain `usbmux list` includes USB and Wi-Fi, while
@@ -238,7 +260,7 @@ Central Blue's **Mac Physical Location** remains the browser's Mac location.
 It is not the iPad's physical location and should retain that label regardless
 of the connected device.
 
-## Recommended implementation
+## Implemented design
 
 ### 1. Add a device inventory and selected-device model
 
@@ -369,10 +391,13 @@ whether it is Wi-Fi-only or Wi-Fi + Cellular. Then:
 1. Connect with a data-capable cable; approve the Mac accessory prompt and
    Trust This Computer if shown.
 2. Confirm the iPad appears in Finder or Xcode Device Hub.
-3. Enable Developer Mode, restart, and confirm it on the iPad.
-4. Run `uv run pymobiledevice3 usbmux list --usb`; verify `DeviceClass` is
+3. Run `uv run --extra device pymobiledevice3 amfi developer-mode-status`. If
+   it reports `false` and the toggle is absent, run
+   `uv run --extra device pymobiledevice3 amfi reveal-developer-mode`. Enable
+   Developer Mode, restart, and confirm it on the iPad.
+4. Run `uv run --extra device pymobiledevice3 usbmux list --usb`; verify `DeviceClass` is
    `iPad`, `ConnectionType` is `USB`, and capture the UDID locally.
-5. Run `uv run pymobiledevice3 mounter auto-mount` and resolve any developer
+5. Run `uv run --extra device pymobiledevice3 mounter auto-mount` and resolve any developer
    image error before location testing.
 6. Preview the exact UDID-targeted static command, then deliberately set a
    harmless test coordinate using `--userspace` on iPadOS 17.4+.

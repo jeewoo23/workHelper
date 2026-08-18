@@ -13,7 +13,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Lock, Thread
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 from urllib.parse import unquote, urlparse
 
 from .directions import (
@@ -24,7 +24,7 @@ from .directions import (
     OsrmDirectionsProvider,
     generate_route,
 )
-from .environment import inspect_environment
+from .environment import DeviceTarget, EnvironmentReport, inspect_environment
 from .gpx import (
     GpxValidationError,
     RoutePoint,
@@ -72,6 +72,7 @@ DEFAULT_DIRECTIONS_PROVIDER = OsrmDirectionsProvider(
 )
 BACKEND_CAPABILITIES = {
     "deleteImports": True,
+    "deviceSelection": True,
     "directionsGeneration": True,
     "googleMapsLinks": True,
     "nullableDuration": True,
@@ -87,36 +88,45 @@ class ActivePlayback:
     started_at: float
     duration_seconds: float
     process: subprocess.Popen[str]
+    device_id: str
+    device_class: str
     paused_at: Optional[float] = None
     total_paused_seconds: float = 0.0
 
 
-def friendly_device_error(message: str) -> str:
+def friendly_device_error(
+    message: str, *, device_class: str = "device", os_name: str = "OS"
+) -> str:
     lower = message.lower()
+    noun = device_class if device_class in ("iPhone", "iPad") else "device"
     if "unable to connect to tunneld" in lower:
         return (
-            "The iPhone developer tunnel is not running. Start it with "
+            f"The {noun} developer tunnel is not running. Start it with "
             "`sudo python3 -m pymobiledevice3 remote tunneld`, or use the userspace "
             "tunnel if your command supports it."
         )
-    if "no usb-connected iphone" in lower or "no device" in lower:
-        return "No USB iPhone was detected. Plug in the phone, unlock it, and tap Trust if iOS asks."
+    if "no usb-connected" in lower or "no device" in lower:
+        return f"No USB {noun} was detected. Connect and unlock it, then tap Trust if {os_name} asks."
     if "developer mode" in lower:
-        return "Developer Mode is not available on the iPhone. Enable Developer Mode in Settings and reconnect the phone."
+        return f"Developer Mode is not available on the {noun}. Enable it in Settings and reconnect the device."
     if "developerdiskimage" in lower or "mount" in lower:
-        return "The iPhone developer image is not mounted. Try `uv run pymobiledevice3 mounter mount`, then retry."
+        return f"The {noun} developer image is not mounted. Try `uv run pymobiledevice3 mounter auto-mount`, then retry."
     if "pass --userspace" in lower or "no-root tunnel" in lower:
-        return "This iOS version needs the userspace developer tunnel. The app uses `--userspace`; reconnect the phone and retry."
+        return f"This {os_name} version needs the userspace developer tunnel. Reconnect the {noun} and retry."
     if "lockdown" in lower or "invalid hostid" in lower or "pair" in lower:
-        return "The iPhone pairing is not ready. Unlock the phone, confirm Trust This Computer, then retry."
+        return f"The {noun} pairing is not ready. Unlock it, confirm Trust This Computer, then retry."
     if "timed out" in lower or "timeout" in lower:
-        return "The device command timed out. Keep the phone unlocked and connected, then retry."
+        return f"The device command timed out. Keep the {noun} unlocked and connected, then retry."
     return message.strip() or "The device command failed."
 
 
 class PlaybackManager:
     def __init__(
-        self, *, userspace: bool = True, registry: Optional[RouteRegistry] = None
+        self,
+        *,
+        userspace: bool = True,
+        registry: Optional[RouteRegistry] = None,
+        device_provider: Optional[Callable[[], EnvironmentReport]] = None,
     ) -> None:
         self._lock = Lock()
         self._active: Optional[ActivePlayback] = None
@@ -124,7 +134,113 @@ class PlaybackManager:
         self._userspace = userspace
         self._last_error: Optional[dict[str, str]] = None
         self._static_location: Optional[dict[str, float]] = None
+        self._static_device: Optional[DeviceTarget] = None
         self._registry = registry or DEFAULT_REGISTRY
+        self._device_provider = device_provider or (
+            lambda: inspect_environment(probe_device=True)
+        )
+        self._selected_device_id: Optional[str] = None
+
+    def device_status(self) -> dict[str, Any]:
+        report = self._refresh_devices()
+        with self._lock:
+            compatible = [device for device in report.devices if device.compatible]
+            selected = next(
+                (
+                    device
+                    for device in compatible
+                    if device.identifier == self._selected_device_id
+                ),
+                None,
+            )
+            payload = report.as_dict()
+            payload.update(
+                {
+                    "selectedDeviceId": self._selected_device_id,
+                    "selectedDevice": selected.as_dict() if selected else None,
+                    "selectionRequired": selected is None and len(compatible) > 0,
+                }
+            )
+            return payload
+
+    def select_device(self, device_id: str) -> dict[str, Any]:
+        if not isinstance(device_id, str) or not device_id.strip():
+            raise ApiError(
+                HTTPStatus.BAD_REQUEST,
+                "A device identifier is required",
+                code="invalid_device_selection",
+            )
+        report = self._refresh_devices()
+        with self._lock:
+            self._reap_locked()
+            self._reap_static_locked()
+            if self._active is not None or self._static_process is not None:
+                raise ApiError(
+                    HTTPStatus.CONFLICT,
+                    "Stop playback and clear the static location before changing devices",
+                    code="device_busy",
+                )
+            selected = next(
+                (
+                    device
+                    for device in report.devices
+                    if device.identifier == device_id and device.compatible
+                ),
+                None,
+            )
+            if selected is None:
+                raise ApiError(
+                    HTTPStatus.BAD_REQUEST,
+                    "That compatible USB device is no longer available",
+                    code="device_unavailable",
+                )
+            self._selected_device_id = selected.identifier
+        return self.device_status()
+
+    def _refresh_devices(self) -> EnvironmentReport:
+        report = self._device_provider()
+        with self._lock:
+            compatible = [device for device in report.devices if device.compatible]
+            if self._selected_device_id is None and len(compatible) == 1:
+                self._selected_device_id = compatible[0].identifier
+        return report
+
+    def _require_target(self) -> DeviceTarget:
+        report = self._refresh_devices()
+        with self._lock:
+            compatible = [device for device in report.devices if device.compatible]
+            selected = next(
+                (
+                    device
+                    for device in compatible
+                    if device.identifier == self._selected_device_id
+                ),
+                None,
+            )
+            if selected is not None:
+                return selected
+            if compatible:
+                raise ApiError(
+                    HTTPStatus.CONFLICT,
+                    "The previously selected device is unavailable. Choose which USB iPhone or iPad to control",
+                    code="device_selection_required",
+                )
+            message = report.device_probe_output or (
+                "No compatible USB iPhone or iPad is connected"
+            )
+            raise ApiError(
+                HTTPStatus.CONFLICT,
+                message,
+                code="device_unavailable",
+            )
+
+    def _assert_target_selected_locked(self, target: DeviceTarget) -> None:
+        if self._selected_device_id != target.identifier:
+            raise ApiError(
+                HTTPStatus.CONFLICT,
+                "The selected device changed; retry the operation",
+                code="device_selection_changed",
+            )
 
     def status(self) -> dict[str, Any]:
         with self._lock:
@@ -138,7 +254,9 @@ class PlaybackManager:
         except RouteRegistryError:
             raise ApiError(HTTPStatus.NOT_FOUND, f"Unknown route: {route_id}")
 
+        target = self._require_target()
         with self._lock:
+            self._assert_target_selected_locked(target)
             self._reap_locked()
             self._reap_static_locked()
             if self._active is not None:
@@ -153,6 +271,7 @@ class PlaybackManager:
                 command_executable,
                 route.track_path,
                 userspace=self._userspace,
+                udid=target.identifier,
             )
             name, points = parse_track(route.track_path)
             summary = summarize(name, points)
@@ -166,7 +285,11 @@ class PlaybackManager:
             except OSError as error:
                 raise ApiError(
                     HTTPStatus.BAD_GATEWAY,
-                    friendly_device_error(str(error)),
+                    friendly_device_error(
+                        str(error),
+                        device_class=target.device_class,
+                        os_name=target.os_name,
+                    ),
                     detail=str(error),
                     code="device_command_failed",
                 ) from error
@@ -176,6 +299,8 @@ class PlaybackManager:
                 started_at=time.monotonic(),
                 duration_seconds=summary.duration_seconds,
                 process=process,
+                device_id=target.identifier,
+                device_class=target.device_class,
             )
             self._static_location = None
             return self._status_locked()
@@ -206,6 +331,8 @@ class PlaybackManager:
         stopped_active_process = False
         with self._lock:
             self._reap_locked()
+            self._reap_static_locked()
+            static_process_active = self._static_process is not None
             active = self._active
             if active is not None:
                 active.process.terminate()
@@ -217,17 +344,29 @@ class PlaybackManager:
                 self._active = None
                 stopped_active_process = True
 
-        if clear_location and stopped_active_process:
+        if clear_location and (stopped_active_process or static_process_active):
             self.clear_location()
         return self.status()
 
     def clear_location(self) -> dict[str, Any]:
+        try:
+            target = self._require_target()
+        except ApiError:
+            with self._lock:
+                self._reap_static_locked()
+                self._stop_static_locked()
+            raise
         with self._lock:
+            self._assert_target_selected_locked(target)
             self._reap_static_locked()
             self._stop_static_locked()
         command_executable = resolve_executable(None)
         result = subprocess.run(
-            clear_arguments(command_executable, userspace=self._userspace),
+            clear_arguments(
+                command_executable,
+                userspace=self._userspace,
+                udid=target.identifier,
+            ),
             check=False,
             capture_output=True,
             text=True,
@@ -236,7 +375,11 @@ class PlaybackManager:
             message = result.stderr.strip() or result.stdout.strip() or "clear failed"
             raise ApiError(
                 HTTPStatus.BAD_GATEWAY,
-                friendly_device_error(message),
+                friendly_device_error(
+                    message,
+                    device_class=target.device_class,
+                    os_name=target.os_name,
+                ),
                 detail=message,
                 code="device_clear_failed",
             )
@@ -250,7 +393,9 @@ class PlaybackManager:
         latitude: float,
         longitude: float,
     ) -> dict[str, Any]:
+        target = self._require_target()
         with self._lock:
+            self._assert_target_selected_locked(target)
             self._reap_locked()
             self._reap_static_locked()
             if self._active is not None:
@@ -266,6 +411,7 @@ class PlaybackManager:
                 latitude,
                 longitude,
                 userspace=self._userspace,
+                udid=target.identifier,
             )
             try:
                 process = subprocess.Popen(
@@ -277,11 +423,16 @@ class PlaybackManager:
             except OSError as error:
                 raise ApiError(
                     HTTPStatus.BAD_GATEWAY,
-                    friendly_device_error(str(error)),
+                    friendly_device_error(
+                        str(error),
+                        device_class=target.device_class,
+                        os_name=target.os_name,
+                    ),
                     detail=str(error),
                     code="device_set_failed",
                 ) from error
             self._static_process = process
+            self._static_device = target
             self._static_location = {
                 "latitude": latitude,
                 "longitude": longitude,
@@ -291,10 +442,12 @@ class PlaybackManager:
             if returncode is not None:
                 raw_error = self._process_stderr(process)
                 self._static_process = None
+                self._static_device = None
                 self._static_location = None
                 message = friendly_device_error(
-                    raw_error
-                    or f"Static location exited with code {returncode}"
+                    raw_error or f"Static location exited with code {returncode}",
+                    device_class=target.device_class,
+                    os_name=target.os_name,
                 )
                 raise ApiError(
                     HTTPStatus.BAD_GATEWAY,
@@ -325,20 +478,24 @@ class PlaybackManager:
             return
         if returncode != 0:
             raw_error = self._process_stderr(self._static_process)
+            target = self._static_device
             self._last_error = {
                 "code": "device_set_failed",
                 "message": friendly_device_error(
-                    raw_error
-                    or f"Static location exited with code {returncode}"
+                    raw_error or f"Static location exited with code {returncode}",
+                    device_class=target.device_class if target else "device",
+                    os_name=target.os_name if target else "OS",
                 ),
                 "detail": raw_error,
             }
         self._static_process = None
+        self._static_device = None
         self._static_location = None
 
     def _stop_static_locked(self) -> None:
         process = self._static_process
         if process is None:
+            self._static_device = None
             self._static_location = None
             return
         process.terminate()
@@ -348,6 +505,7 @@ class PlaybackManager:
             process.kill()
             process.wait(timeout=5)
         self._static_process = None
+        self._static_device = None
         self._static_location = None
 
     def _reap_locked(self) -> None:
@@ -357,7 +515,11 @@ class PlaybackManager:
         if returncode is not None:
             if returncode != 0:
                 raw_error = self._process_stderr(self._active.process)
-                message = friendly_device_error(raw_error or f"Route playback exited with code {returncode}")
+                message = friendly_device_error(
+                    raw_error or f"Route playback exited with code {returncode}",
+                    device_class=self._active.device_class,
+                    os_name="iPadOS" if self._active.device_class == "iPad" else "iOS",
+                )
                 self._last_error = {
                     "code": "playback_failed",
                     "message": message,
@@ -397,6 +559,8 @@ class PlaybackManager:
             "durationSeconds": self._active.duration_seconds,
             "progress": progress,
             "pid": self._active.process.pid,
+            "deviceId": self._active.device_id,
+            "deviceClass": self._active.device_class,
         }
 
 
@@ -446,9 +610,9 @@ class RouteRequestHandler(BaseHTTPRequestHandler):
             if parsed.path == "/api/status":
                 self._send_json(
                     {
-                        "apiVersion": 2,
+                        "apiVersion": 3,
                         "capabilities": BACKEND_CAPABILITIES,
-                        "device": inspect_environment(probe_device=True).as_dict(),
+                        "device": self.manager.device_status(),
                         "playback": self.manager.status(),
                         "simulatedLocation": self.manager.simulated_location(),
                     }
@@ -510,6 +674,11 @@ class RouteRequestHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         try:
             parsed = urlparse(self.path)
+            if parsed.path == "/api/device/select":
+                payload = self._read_json_body()
+                device_id = payload.get("deviceId") if isinstance(payload, dict) else None
+                self._send_json(self.manager.select_device(device_id))
+                return
             if parsed.path == "/api/routes/from-google-maps-link":
                 generated = generate_google_maps_directions_gpx(
                     self._read_json_body(),
@@ -1222,7 +1391,7 @@ def delete_imported_gpx(
     if active_route_id in matching_ids:
         raise ApiError(
             HTTPStatus.CONFLICT,
-            "Stop phone playback before deleting this imported route",
+            "Stop device playback before deleting this imported route",
             code="route_in_use",
         )
 

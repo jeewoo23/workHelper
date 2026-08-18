@@ -169,7 +169,12 @@ class RouteRegistry:
         for index, item in enumerate(routes):
             if not isinstance(item, dict):
                 raise RouteRegistryError(f"Route registry item {index} is not an object")
-            route = self._record_from_payload(item, index=index)
+            try:
+                route = self._record_from_payload(item, index=index)
+            except RouteRegistryError as error:
+                if item.get("bundled") is False and "track does not exist" in str(error):
+                    continue
+                raise
             if route.id in seen:
                 raise RouteRegistryError(f"Duplicate route id in registry: {route.id}")
             seen.add(route.id)

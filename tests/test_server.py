@@ -9,6 +9,7 @@ from threading import Thread
 
 import pytest
 
+from route_controller.environment import DeviceTarget, EnvironmentReport
 from route_controller.server import (
     ApiError,
     PlaybackManager,
@@ -34,6 +35,52 @@ from route_controller.timing import RoadTimingEstimate
 
 
 ROOT = Path(__file__).resolve().parents[1]
+IPAD = DeviceTarget(
+    identifier="00008110-TEST-IPAD",
+    name="Test iPad",
+    device_class="iPad",
+    product_type="iPad14,5",
+    product_version="18.6",
+    connection_type="USB",
+    os_name="iPadOS",
+    supported=True,
+    compatible=True,
+)
+IPHONE = DeviceTarget(
+    identifier="00008120-TEST-IPHONE",
+    name="Test iPhone",
+    device_class="iPhone",
+    product_type="iPhone17,1",
+    product_version="18.6",
+    connection_type="USB",
+    os_name="iOS",
+    supported=True,
+    compatible=True,
+)
+
+
+def device_report(*devices: DeviceTarget) -> EnvironmentReport:
+    return EnvironmentReport(
+        macos_version="15.0",
+        python_version="3.13",
+        xcode_version="Xcode test",
+        pymobiledevice3_path="/bin/pymobiledevice3",
+        device_probe_attempted=True,
+        device_probe_ok=any(device.compatible for device in devices),
+        device_count=len(devices),
+        device_probe_output=(
+            json.dumps([device.as_dict() for device in devices])
+            if devices
+            else "No USB-connected iPhone or iPad found"
+        ),
+        devices=tuple(devices),
+    )
+
+
+def ipad_provider() -> EnvironmentReport:
+    return device_report(IPAD)
+
+
 UNTIMED_TRACK = """<?xml version="1.0" encoding="UTF-8"?>
 <gpx version="1.1" creator="MapsToGPX"
      xmlns="http://www.topografix.com/GPX/1/1">
@@ -117,6 +164,67 @@ class FakeDirectionsProvider:
         )
 
 
+def test_single_ipad_is_auto_selected() -> None:
+    manager = PlaybackManager(device_provider=ipad_provider)
+
+    status = manager.device_status()
+
+    assert status["selectionRequired"] is False
+    assert status["selectedDeviceId"] == IPAD.identifier
+    assert status["selectedDevice"]["deviceClass"] == "iPad"
+    assert status["selectedDevice"]["osName"] == "iPadOS"
+
+
+def test_multiple_devices_require_explicit_selection() -> None:
+    manager = PlaybackManager(
+        device_provider=lambda: device_report(IPHONE, IPAD)
+    )
+
+    status = manager.device_status()
+
+    assert status["selectionRequired"] is True
+    assert status["selectedDevice"] is None
+
+    selected = manager.select_device(IPAD.identifier)
+
+    assert selected["selectedDeviceId"] == IPAD.identifier
+    assert selected["selectedDevice"]["deviceClass"] == "iPad"
+
+
+def test_disconnected_selected_ipad_blocks_new_commands() -> None:
+    connected = [True]
+    manager = PlaybackManager(
+        registry=RouteRegistry(ROOT),
+        device_provider=lambda: device_report(IPAD) if connected[0] else device_report(),
+    )
+    assert manager.device_status()["selectedDeviceId"] == IPAD.identifier
+    connected[0] = False
+
+    with pytest.raises(ApiError) as raised:
+        manager.start("l1-to-l2")
+
+    assert raised.value.code == "device_unavailable"
+
+
+def test_replacement_iphone_is_not_selected_after_ipad_disconnects() -> None:
+    connected = [IPAD]
+    manager = PlaybackManager(
+        registry=RouteRegistry(ROOT),
+        device_provider=lambda: device_report(*connected),
+    )
+    assert manager.device_status()["selectedDeviceId"] == IPAD.identifier
+    connected[:] = [IPHONE]
+
+    status = manager.device_status()
+
+    assert status["selectedDeviceId"] == IPAD.identifier
+    assert status["selectedDevice"] is None
+    assert status["selectionRequired"] is True
+    with pytest.raises(ApiError) as raised:
+        manager.start("l1-to-l2")
+    assert raised.value.code == "device_selection_required"
+
+
 def test_route_payload_reports_checked_in_tracks() -> None:
     outbound = route_payload("l1-to-l2")
     inbound = route_payload("l2-to-l1")
@@ -143,6 +251,30 @@ def test_route_registry_loads_seeded_routes() -> None:
         routes_by_id["l1-to-l2"].track_path
         == ROOT / "routes/tracks/route_L1_to_L2.track.gpx"
     )
+
+
+def test_route_registry_ignores_stale_generated_tracks(tmp_path: Path) -> None:
+    registry_path = tmp_path / "routes.json"
+    registry_path.write_text(
+        json.dumps(
+            {
+                "routes": [
+                    {
+                        "id": "stale-generated",
+                        "label": "Stale generated route",
+                        "direction": "custom",
+                        "trackPath": "routes/generated/missing.track.gpx",
+                        "bundled": False,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    registry = RouteRegistry(tmp_path, registry_path=registry_path)
+
+    assert registry.all() == []
 
 
 def test_route_registry_rejects_paths_outside_project(tmp_path: Path) -> None:
@@ -204,7 +336,11 @@ def test_playback_manager_owns_one_process(monkeypatch) -> None:
         lambda *args, **kwargs: subprocess.CompletedProcess(args, 0, "", ""),
     )
 
-    manager = PlaybackManager(userspace=True, registry=RouteRegistry(ROOT))
+    manager = PlaybackManager(
+        userspace=True,
+        registry=RouteRegistry(ROOT),
+        device_provider=ipad_provider,
+    )
     status = manager.start("l1-to-l2")
 
     assert status["state"] == "playing"
@@ -217,6 +353,7 @@ def test_playback_manager_owns_one_process(monkeypatch) -> None:
         "play",
     ]
     assert "--userspace" in processes[0].arguments
+    assert processes[0].arguments[6:8] == ["--udid", IPAD.identifier]
 
     with pytest.raises(ApiError, match="already playing"):
         manager.start("l2-to-l1")
@@ -258,7 +395,7 @@ def test_playback_manager_sets_and_clears_static_location(monkeypatch) -> None:
             arguments, 0, "", ""
         ),
     )
-    manager = PlaybackManager(userspace=True)
+    manager = PlaybackManager(userspace=True, device_provider=ipad_provider)
 
     activated = manager.set_location(37.3835546, -122.1371287)
 
@@ -278,6 +415,8 @@ def test_playback_manager_sets_and_clears_static_location(monkeypatch) -> None:
         "simulate-location",
         "set",
         "--userspace",
+        "--udid",
+        IPAD.identifier,
         "--",
         "37.3835546",
         "-122.1371287",
@@ -339,6 +478,7 @@ def test_static_location_endpoint_sets_reports_and_clears(
     StaticLocationHandler.manager = PlaybackManager(
         userspace=True,
         registry=StaticLocationHandler.registry,
+        device_provider=ipad_provider,
     )
     server = ThreadingHTTPServer(("127.0.0.1", 0), StaticLocationHandler)
     thread = Thread(target=server.serve_forever, daemon=True)
@@ -394,9 +534,20 @@ def test_static_location_endpoint_sets_reports_and_clears(
     assert invalid_payload["errorCode"] == "invalid_static_location"
     assert clear_response.status == 200
     assert clear_payload == {"state": "cleared"}
-    assert processes[0].arguments[4:7] == ["set", "--userspace", "--"]
+    assert processes[0].arguments[4:9] == [
+        "set",
+        "--userspace",
+        "--udid",
+        IPAD.identifier,
+        "--",
+    ]
     assert processes[0].terminated is True
-    assert commands[-1][4:] == ["clear", "--userspace"]
+    assert commands[-1][4:] == [
+        "clear",
+        "--userspace",
+        "--udid",
+        IPAD.identifier,
+    ]
 
 
 def test_friendly_device_error_explains_tunneld_recovery() -> None:
@@ -421,7 +572,7 @@ def test_failed_playback_status_keeps_friendly_error(monkeypatch) -> None:
     monkeypatch.setattr("route_controller.server.resolve_executable", lambda _: "pymobiledevice3")
     monkeypatch.setattr("route_controller.server.subprocess.Popen", fake_popen)
 
-    manager = PlaybackManager(userspace=True)
+    manager = PlaybackManager(userspace=True, device_provider=ipad_provider)
     manager.start("l1-to-l2")
     processes[0].returncode = 1
 
@@ -429,7 +580,7 @@ def test_failed_playback_status_keeps_friendly_error(monkeypatch) -> None:
 
     assert status["state"] == "idle"
     assert status["error"]["code"] == "playback_failed"
-    assert "No USB iPhone was detected" in status["error"]["message"]
+    assert "No USB iPad was detected" in status["error"]["message"]
 
 
 def test_import_gpx_payload_saves_untimed_route_and_returns_summary(

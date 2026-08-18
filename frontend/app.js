@@ -22,6 +22,7 @@ const state = {
     deviceReport: null,
     routes: [],
     playback: { state: "idle" },
+    selectingDevice: false,
     error: "",
     mode: "preview"
   },
@@ -217,7 +218,7 @@ function distanceMeters(first, second) {
 async function importGpxFile(file) {
   if (!file) return;
   if (isDevicePlaybackActive()) {
-    setImportError("Stop phone playback before importing another route.");
+    setImportError("Stop device playback before importing another route.");
     return;
   }
   if (!state.backend.available) {
@@ -306,7 +307,7 @@ async function refreshImportedRoutes() {
 
 async function selectImportedRoute(filename) {
   if (isDevicePlaybackActive()) {
-    setImportError("Stop phone playback before previewing another route.");
+    setImportError("Stop device playback before previewing another route.");
     return;
   }
   const item = state.importedRoute.items.find(
@@ -356,7 +357,7 @@ async function deleteImportedRoute(filename) {
   }
   if (isDevicePlaybackActive()) {
     state.importedRoute.status = "delete-error";
-    state.importedRoute.error = "Stop phone playback before deleting an imported route.";
+    state.importedRoute.error = "Stop device playback before deleting an imported route.";
     updateRouteCards();
     return;
   }
@@ -442,7 +443,7 @@ async function prepareActiveImport() {
   if (!metadata || !durationInput || !autoDurationInput) return;
   if (isDevicePlaybackActive()) {
     state.importedRoute.preparationStatus = "error";
-    state.importedRoute.preparationError = "Stop phone playback before rebuilding a route.";
+    state.importedRoute.preparationError = "Stop device playback before rebuilding a route.";
     updatePreparationPanel();
     return;
   }
@@ -555,7 +556,7 @@ function previewDurationSeconds() {
   return state.previewDurationSeconds[state.direction] || elapsedRouteSeconds();
 }
 
-function isPhoneControllable() {
+function isDeviceControllable() {
   return state.backend.available && !!state.backend.device;
 }
 
@@ -564,7 +565,7 @@ function supportsBackendCapability(capability) {
 }
 
 function canControlActiveRoute() {
-  return isPhoneControllable() && !!routeId();
+  return isDeviceControllable() && !!routeId();
 }
 
 function isDevicePlaybackActive() {
@@ -611,10 +612,11 @@ function renderShell() {
               <div class="header-device-name">
                 <small>DEVICE LINK</small>
                 <strong data-live="device-name">Backend offline</strong>
+                <select class="device-selector" data-action="device-select" aria-label="Select USB device" hidden></select>
               </div>
               <div class="header-device-meta">
                 <span><small>MODEL</small><b data-live="device-model">—</b></span>
-                <span><small>IOS</small><b data-live="device-ios">—</b></span>
+                <span><small data-live="device-os-label">OS</small><b data-live="device-ios">—</b></span>
               </div>
             </section>
             <span class="status-pill"><i class="status-dot"></i><span data-live="status">Ready to preview</span></span>
@@ -717,7 +719,7 @@ function renderShell() {
                       </div>
                       <div class="route-preparation" data-live-card="preparation" hidden>
                         <div class="preparation-heading">
-                          <p>IPHONE PLAYBACK</p>
+                          <p>DEVICE PLAYBACK</p>
                           <b data-live="preparation-state">NOT PREPARED</b>
                         </div>
                         <label class="timing-option">
@@ -731,7 +733,7 @@ function renderShell() {
                           </label>
                           <button class="secondary prepare-button" data-action="prepare-import">PREPARE</button>
                         </div>
-                        <em data-live="preparation-note">Choose the playback duration, then build a phone-ready track.</em>
+                        <em data-live="preparation-note">Choose the playback duration, then build a device-ready track.</em>
                       </div>
                     </section>
                     <div class="imported-route-list" data-imported-route-list>
@@ -765,7 +767,7 @@ function renderShell() {
                           <button class="secondary static-map-button" type="button" data-action="pick-static-location" aria-pressed="false">PICK ON MAP</button>
                           <button class="secondary static-activate-button" type="button" data-action="activate-location">ACTIVATE</button>
                         </div>
-                        <em data-live="static-location-note">Enter a coordinate, then activate it on the connected iPhone.</em>
+                        <em data-live="static-location-note">Enter a coordinate, then activate it on the connected device.</em>
                       </div>
                     </div>
 
@@ -778,7 +780,7 @@ function renderShell() {
                         <button type="button" data-copy-source="physical" aria-label="Copy Mac physical coordinates" disabled>COPY</button>
                       </div>
                       <button class="secondary location-button" data-action="physical-location"><span data-live="physical-location-label">SHOW MARKER</span></button>
-                      <em data-live="physical-location-note">Uses browser Location Services on this Mac, not simulated iPhone GPS.</em>
+                      <em data-live="physical-location-note">Uses browser Location Services on this Mac, not the simulated device location.</em>
                     </div>
                   </div>
                 </details>
@@ -860,6 +862,10 @@ function renderShell() {
 }
 
 function bindControls() {
+  document.querySelector('[data-action="device-select"]').addEventListener(
+    "change",
+    event => selectDevice(event.target.value)
+  );
   document.querySelectorAll("[data-direction]").forEach(button => {
     button.addEventListener("click", () => setDirection(button.dataset.direction));
   });
@@ -1063,7 +1069,7 @@ function syncBuilderEndpointFromInputs(
 function useRouteBuilderLocation(target, source) {
   if (isDevicePlaybackActive()) {
     state.routeBuilder.status = "error";
-    state.routeBuilder.error = "Stop phone playback before changing route endpoints.";
+    state.routeBuilder.error = "Stop device playback before changing route endpoints.";
     updateRouteBuilderPanel();
     return;
   }
@@ -1096,7 +1102,7 @@ function setRouteBuilderPickTarget(target) {
   if (!["origin", "destination"].includes(target)) return;
   if (isDevicePlaybackActive()) {
     state.routeBuilder.status = "error";
-    state.routeBuilder.error = "Stop phone playback before changing route endpoints.";
+    state.routeBuilder.error = "Stop device playback before changing route endpoints.";
     updateRouteBuilderPanel();
     return;
   }
@@ -1147,7 +1153,7 @@ function frameRouteBuilderEndpoints() {
 async function generateDirectionsPreview() {
   if (isDevicePlaybackActive()) {
     state.routeBuilder.status = "error";
-    state.routeBuilder.error = "Stop phone playback before generating another route.";
+    state.routeBuilder.error = "Stop device playback before generating another route.";
     updateRouteBuilderPanel();
     return;
   }
@@ -1207,7 +1213,7 @@ async function generateDirectionsPreview() {
 async function generateGoogleMapsPreview() {
   if (isDevicePlaybackActive()) {
     state.routeBuilder.status = "error";
-    state.routeBuilder.error = "Stop phone playback before generating another route.";
+    state.routeBuilder.error = "Stop device playback before generating another route.";
     updateRouteBuilderPanel();
     return;
   }
@@ -1362,7 +1368,7 @@ function updateRouteBuilderPanel() {
     setText("builder-status", `${metadata.name || "Generated route"} preview ready`);
     setText(
       "builder-detail",
-      `${metadata.provider || "Routing provider"} · ${formatDistance(metadata.distanceMeters)} · ETA ${durationMinutes(metadata.estimatedDurationSeconds)} · prepare it for phone playback`
+      `${metadata.provider || "Routing provider"} · ${formatDistance(metadata.distanceMeters)} · ETA ${durationMinutes(metadata.estimatedDurationSeconds)} · prepare it for device playback`
     );
   } else if (!state.backend.available) {
     setText("builder-status", "Local backend required");
@@ -1451,6 +1457,7 @@ async function refreshBackendStatus() {
     state.backend.capabilities = payload.capabilities || {};
     state.backend.deviceReport = payload.device || null;
     state.backend.device = parseDevice(payload.device);
+    renderDeviceSelector(payload.device);
     state.backend.playback = payload.playback || { state: "idle" };
     const simulatedLocation = payload.simulatedLocation;
     if (
@@ -1507,29 +1514,77 @@ async function refreshBackendRoutes() {
 }
 
 function parseDevice(report) {
-  if (!report || !report.device_probe_ok || !report.device_probe_output) return null;
-  try {
-    const devices = JSON.parse(report.device_probe_output);
-    return Array.isArray(devices) && devices.length ? devices[0] : null;
-  } catch (error) {
-    return null;
-  }
+  if (!report || !report.device_probe_ok) return null;
+  const selected = report.selectedDevice;
+  return selected?.compatible ? selected : null;
 }
 
 function deviceProbeMessage(report) {
-  if (!report || !report.device_probe_attempted) return "Run ./scripts/run_frontend.sh for live phone control.";
-  if (report.device_probe_ok) return "";
+  if (!report || !report.device_probe_attempted) return "Run ./scripts/run_frontend.sh for live device control.";
+  if (report.selectionRequired) return "Choose which connected USB device to control.";
+  if (report.device_probe_ok && report.selectedDevice) return "";
+  const incompatible = Array.isArray(report.devices)
+    ? report.devices.find(device => !device.compatible)
+    : null;
+  if (incompatible?.compatibilityMessage) return incompatible.compatibilityMessage;
   const output = report.device_probe_output || "";
-  if (/no usb-connected iphone/i.test(output)) {
-    return "No USB iPhone detected. Plug in the phone, unlock it, and tap Trust if prompted.";
+  if (/no usb-connected iphone or ipad/i.test(output)) {
+    return "No USB iPhone or iPad detected. Connect and unlock the device, then tap Trust if prompted.";
   }
   if (/unable to connect to tunneld/i.test(output)) {
     return "Developer tunnel is not running. Start tunneld, or reconnect and retry with userspace mode.";
   }
   if (/developer mode/i.test(output)) {
-    return "Enable Developer Mode on the iPhone, then reconnect it.";
+    return "Enable Developer Mode on the device, then reconnect it.";
   }
-  return output || "Device probe failed. Reconnect and unlock the iPhone, then retry.";
+  return output || "Device probe failed. Reconnect and unlock the device, then retry.";
+}
+
+function renderDeviceSelector(report) {
+  const selector = document.querySelector('[data-action="device-select"]');
+  const name = document.querySelector('[data-live="device-name"]');
+  if (!selector || !name) return;
+  const devices = Array.isArray(report?.devices)
+    ? report.devices.filter(device => device.compatible)
+    : [];
+  const needsSelector = devices.length > 1
+    || (report?.selectionRequired && devices.length > 0);
+  selector.hidden = !needsSelector;
+  name.hidden = needsSelector;
+  if (!needsSelector) return;
+
+  const selectedId = report?.selectedDeviceId || "";
+  const options = [
+    `<option value="">Choose USB device…</option>`,
+    ...devices.map(device => {
+      const selected = device.id === selectedId ? " selected" : "";
+      return `<option value="${escapeHtml(device.id)}"${selected}>${escapeHtml(device.name)} · ${escapeHtml(device.deviceClass)}</option>`;
+    })
+  ].join("");
+  if (selector.innerHTML !== options) selector.innerHTML = options;
+  selector.disabled = state.backend.selectingDevice || isDevicePlaybackActive()
+    || state.staticLocation.status === "active";
+}
+
+async function selectDevice(deviceId) {
+  if (!deviceId || state.backend.selectingDevice) return;
+  state.backend.selectingDevice = true;
+  renderDeviceSelector(state.backend.deviceReport);
+  try {
+    const report = await apiRequest("/api/device/select", {
+      method: "POST",
+      body: JSON.stringify({ deviceId })
+    });
+    state.backend.deviceReport = report;
+    state.backend.device = parseDevice(report);
+    state.backend.error = "";
+  } catch (error) {
+    state.backend.error = error.message;
+  } finally {
+    state.backend.selectingDevice = false;
+    renderDeviceSelector(state.backend.deviceReport);
+    updateLiveState();
+  }
 }
 
 function preparedRouteForImport(metadata) {
@@ -1594,10 +1649,10 @@ function renderImportedRouteList() {
     const deleting = state.importedRoute.deletingFilename === metadata.filename;
     const deletionAvailable = supportsBackendCapability("deleteImports");
     const timing = prepared
-      ? `Phone ready · ${timingModeLabel(prepared)} · ${durationMinutes(prepared.durationSeconds)}`
+      ? `Device ready · ${timingModeLabel(prepared)} · ${durationMinutes(prepared.durationSeconds)}`
       : metadata.hasTimestamps
-        ? "Timed · prepare for phone"
-        : "Untimed · prepare for phone";
+        ? "Timed · prepare for device"
+        : "Untimed · prepare for device";
     const routeLabel = metadata.name
       || metadata.originalFilename
       || metadata.filename;
@@ -2059,7 +2114,7 @@ function updateStaticLocationPanel() {
     || isDevicePlaybackActive()
     || !state.backend.available
     || !capable
-    || !isPhoneControllable();
+    || !isDeviceControllable();
   card.classList.toggle("active", status === "active");
   card.classList.toggle("error", status === "error");
   card.classList.toggle(
@@ -2092,8 +2147,8 @@ function updateStaticLocationPanel() {
     note = "Start the local controller before activating a position.";
   } else if (!capable) {
     note = "Restart the local controller to enable static positions.";
-  } else if (!isPhoneControllable()) {
-    note = "Connect and unlock the iPhone before activating a position.";
+  } else if (!isDeviceControllable()) {
+    note = "Connect, unlock, and select a compatible iPhone or iPad before activating a position.";
   }
   setText("static-location-note", note);
 }
@@ -2634,22 +2689,24 @@ function updateLiveState() {
   const percent = Math.round(state.progress * 100);
   const backendPlayback = state.backend.playback || { state: "idle" };
   const device = state.backend.device;
+  const deviceClass = device?.deviceClass || "device";
+  const deviceName = device?.name || `Connected ${deviceClass}`;
   const deviceMessage = deviceProbeMessage(state.backend.deviceReport);
-  const deviceOnline = isPhoneControllable();
-  const activeRoutePhoneReady = canControlActiveRoute();
+  const deviceOnline = isDeviceControllable();
+  const activeRouteDeviceReady = canControlActiveRoute();
   const devicePlaybackActive = isDevicePlaybackActive();
   const importedPreview = state.direction === "imported";
   const preparedImport = importedPreview
     ? preparedRouteForImport(state.importedRoute.metadata)
     : null;
-  const previewWithoutPhone = state.backend.available && !deviceOnline && !importedPreview;
+  const previewWithoutDevice = state.backend.available && !deviceOnline && !importedPreview;
   const backendError = state.backend.error;
   const staticActive = state.staticLocation.status === "active"
     && !!state.staticLocation.point;
   const status = state.backend.available && backendPlayback.state === "playing"
-    ? `Phone traveling to ${destinationName()}`
+    ? `${deviceClass} traveling to ${destinationName()}`
     : state.backend.available && backendPlayback.state === "paused"
-      ? "Phone route paused"
+      ? `${deviceClass} route paused`
       : backendError
         ? "Backend needs attention"
       : staticActive
@@ -2667,29 +2724,29 @@ function updateLiveState() {
             : importedPreview
               ? "Imported route ready to preview"
             : state.backend.available
-              ? "Phone backend ready"
+              ? "Device backend ready"
               : "Ready to preview";
 
   setText("status", status);
   setText("connection-label", deviceOnline
-    ? "Backend + iPhone connected"
+    ? `Backend + ${deviceClass} connected`
     : state.backend.available
-      ? "Backend online / phone not detected"
+      ? "Backend online / device not ready"
       : "Preview only");
   setText("origin", originName());
   setText("destination", destinationName());
-  setText("toggle-label", activeRoutePhoneReady || devicePlaybackActive
+  setText("toggle-label", activeRouteDeviceReady || devicePlaybackActive
     ? backendPlayback.state === "playing"
-      ? "Pause phone"
+      ? "Pause device"
       : backendPlayback.state === "paused"
-        ? "Resume phone"
-        : "Start on phone"
+        ? "Resume device"
+        : "Start on device"
     : state.playing
       ? "Pause preview"
       : state.progress > 0 && state.progress < 1
         ? "Resume preview"
-        : previewWithoutPhone
-          ? "Simulate path without phone"
+        : previewWithoutDevice
+          ? "Simulate path without device"
           : importedPreview
             ? "Start route preview"
           : "Start preview");
@@ -2721,7 +2778,7 @@ function updateLiveState() {
       ? "Waiting for browser Location Services permission…"
       : state.physicalLocation.coords
         ? `Browser Location Services · accuracy ±${Math.round(state.physicalLocation.coords.accuracy)}m`
-        : "Uses browser Location Services on this Mac, not simulated iPhone GPS.");
+        : "Uses browser Location Services on this Mac, not the simulated device location.");
   setText("track-label", state.trackSimulatedLocation ? "TRACKING SIM" : "TRACK SIM");
   setText("control-state", state.backend.available
     ? backendPlayback.state === "playing"
@@ -2734,41 +2791,42 @@ function updateLiveState() {
             ? "FIXED"
           : importedPreview
             ? preparedImport
-              ? "PHONE READY"
+              ? "DEVICE READY"
               : "IMPORTED"
-          : previewWithoutPhone
-            ? "NO PHONE"
+          : previewWithoutDevice
+            ? "NO DEVICE"
             : "READY"
     : state.playing ? "RUNNING" : state.progress >= 1 ? "COMPLETE" : state.progress > 0 ? "PAUSED" : "STANDBY");
   setText("backend-note", state.backend.error
     ? state.backend.error
     : staticActive
-      ? `iPhone fixed at ${coordinateText(state.staticLocation.point)}`
+      ? `${deviceClass} fixed at ${coordinateText(state.staticLocation.point)}`
     : importedPreview
       ? preparedImport
         ? deviceOnline
-          ? `Phone-ready track · ${durationMinutes(preparedImport.durationSeconds)}`
-          : "Phone-ready track · connect an iPhone to play"
-        : "Preview only · prepare this route for phone playback"
+          ? `Device-ready track · ${durationMinutes(preparedImport.durationSeconds)}`
+          : "Device-ready track · connect an iPhone or iPad to play"
+        : "Preview only · prepare this route for device playback"
     : state.backend.available
       ? deviceOnline
         ? "Device controls are live"
         : state.playing
-          ? "Preview simulation is running locally; no phone is being controlled."
-          : deviceMessage || "Backend is running, but no USB iPhone is detected"
+          ? "Preview simulation is running locally; no device is being controlled."
+          : deviceMessage || "Backend is running, but no compatible USB device is selected"
       : "Preview mode");
   setText(
     "transport-title",
-    importedPreview && preparedImport ? "IPHONE TRANSPORT" : importedPreview ? "IMPORTED ROUTE" : deviceOnline ? "IPHONE TRANSPORT" : "PREVIEW TRANSPORT"
+    importedPreview && preparedImport ? "DEVICE TRANSPORT" : importedPreview ? "IMPORTED ROUTE" : deviceOnline ? `${deviceClass.toUpperCase()} TRANSPORT` : "PREVIEW TRANSPORT"
   );
-  setText("device-name", deviceOnline ? device.DeviceName || "Connected iPhone" : state.backend.available ? "No iPhone detected" : "Backend offline");
-  setText("device-model", deviceOnline ? device.ProductType || "iPhone" : "—");
-  setText("device-ios", deviceOnline ? device.ProductVersion || "—" : "—");
+  setText("device-name", deviceOnline ? deviceName : state.backend.available ? "No device selected" : "Backend offline");
+  setText("device-model", deviceOnline ? device.productType || deviceClass : "—");
+  setText("device-os-label", deviceOnline ? device.osName || "OS" : "OS");
+  setText("device-ios", deviceOnline ? device.productVersion || "—" : "—");
   setText("device-detail", deviceOnline
-    ? `${device.ConnectionType || "USB"} · ${device.Identifier || "paired device"}`
+    ? `${device.connectionType || "USB"} · ${device.displayId || "paired device"}`
     : state.backend.available
-      ? deviceMessage || "Connect and unlock the phone, then refresh status."
-      : "Run ./scripts/run_frontend.sh for live phone control.");
+      ? deviceMessage || "Connect and unlock the device, then refresh status."
+      : "Run ./scripts/run_frontend.sh for live device control.");
 
   document.querySelectorAll(".status-pill:not(.connection-pill) .status-dot, .control-state .status-dot").forEach(dot => {
     dot.classList.toggle("playing", state.playing);
@@ -2777,8 +2835,10 @@ function updateLiveState() {
   document.querySelector(".play-icon").textContent = state.playing ? "Ⅱ" : "▶";
   const toggleButton = document.querySelector('[data-action="toggle"]');
   if (toggleButton) {
-    toggleButton.classList.toggle("preview-warning", previewWithoutPhone && !deviceOnline);
+    toggleButton.classList.toggle("preview-warning", previewWithoutDevice && !deviceOnline);
   }
+  const clearButton = document.querySelector('[data-action="clear"]');
+  if (clearButton) clearButton.disabled = !deviceOnline;
   const trackButton = document.querySelector('[data-action="track-simulated"]');
   if (trackButton) {
     trackButton.classList.toggle("selected", state.trackSimulatedLocation);
@@ -2802,6 +2862,7 @@ function updateLiveState() {
   updateImportPanel();
   updateRouteBuilderPanel();
   updateStaticLocationPanel();
+  renderDeviceSelector(state.backend.deviceReport);
 
   const progress = document.querySelector(".progress");
   const bar = document.querySelector('[data-live="progress-bar"]');
@@ -2840,7 +2901,7 @@ function syncRemainingInput() {
   input.value = formatMinutesInput(remaining / 60);
   input.disabled = isDevicePlaybackActive();
   input.title = input.disabled
-    ? "Phone playback uses the saved GPX timing. Stop phone playback before editing preview timing."
+    ? "Device playback uses the saved GPX timing. Stop device playback before editing preview timing."
     : "Edit remaining preview minutes. At 0%, this is the total preview duration.";
 }
 

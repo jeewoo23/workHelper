@@ -114,6 +114,19 @@ h1, h2, p { margin-top: 0; }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.device-selector {
+  max-width: 190px;
+  min-height: 24px;
+  padding: 2px 24px 2px 6px;
+  overflow: hidden;
+  color: #dce6ee;
+  background: var(--panel-deep);
+  border: 1px solid var(--blue);
+  border-radius: 4px;
+  font: 500 9px "IBM Plex Mono", monospace;
+  text-overflow: ellipsis;
+}
+.device-selector:disabled { opacity: .55; }
 .header-device-meta {
   display: flex;
   gap: 12px;

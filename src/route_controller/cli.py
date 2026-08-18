@@ -22,7 +22,7 @@ from .server import run_server
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="route-controller",
-        description="Prepare and safely play timed GPX tracks on a tethered iPhone.",
+        description="Prepare and safely play timed GPX tracks on a tethered iPhone or iPad.",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -57,6 +57,7 @@ def _parser() -> argparse.ArgumentParser:
     set_location.add_argument("longitude", type=float)
     set_location.add_argument("--execute", action="store_true")
     set_location.add_argument("--executable")
+    set_location.add_argument("--udid", help="Target one connected device by UDID")
     set_location.add_argument(
         "--userspace",
         action="store_true",
@@ -67,6 +68,7 @@ def _parser() -> argparse.ArgumentParser:
     play.add_argument("route", type=Path)
     play.add_argument("--execute", action="store_true")
     play.add_argument("--executable")
+    play.add_argument("--udid", help="Target one connected device by UDID")
     play.add_argument(
         "--userspace",
         action="store_true",
@@ -78,9 +80,10 @@ def _parser() -> argparse.ArgumentParser:
         help="Do not restore real location after Ctrl-C",
     )
 
-    clear = subparsers.add_parser("clear", help="Restore the phone's real location")
+    clear = subparsers.add_parser("clear", help="Restore the device's real location")
     clear.add_argument("--execute", action="store_true")
     clear.add_argument("--executable")
+    clear.add_argument("--udid", help="Target one connected device by UDID")
     clear.add_argument(
         "--userspace",
         action="store_true",
@@ -165,10 +168,11 @@ def _run(arguments: argparse.Namespace) -> int:
             executable=arguments.executable,
             execute=arguments.execute,
             userspace=arguments.userspace,
+            udid=arguments.udid,
             clear_on_interrupt=not arguments.no_clear_on_interrupt,
         )
         if not result.executed:
-            print("Dry run; add --execute to control the connected phone:")
+            print("Dry run; add --execute to control the connected device:")
             _print_command(result.arguments)
             return 0
         return _print_executed_result("Route playback", result.returncode)
@@ -180,9 +184,10 @@ def _run(arguments: argparse.Namespace) -> int:
             executable=arguments.executable,
             execute=arguments.execute,
             userspace=arguments.userspace,
+            udid=arguments.udid,
         )
         if not result.executed:
-            print("Dry run; add --execute to set the connected phone's location:")
+            print("Dry run; add --execute to set the connected device's location:")
             _print_command(result.arguments)
             return 0
         return _print_executed_result("Static location set", result.returncode)
@@ -192,9 +197,10 @@ def _run(arguments: argparse.Namespace) -> int:
             executable=arguments.executable,
             execute=arguments.execute,
             userspace=arguments.userspace,
+            udid=arguments.udid,
         )
         if not result.executed:
-            print("Dry run; add --execute to restore the connected phone's real location:")
+            print("Dry run; add --execute to restore the connected device's real location:")
             _print_command(result.arguments)
             return 0
         return _print_executed_result("Location clear", result.returncode)

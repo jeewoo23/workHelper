@@ -32,13 +32,23 @@ def resolve_executable(explicit: Optional[str] = None) -> str:
     return located
 
 
-def _with_device_options(arguments: list[str], *, userspace: bool) -> list[str]:
+def _with_device_options(
+    arguments: list[str], *, userspace: bool, udid: Optional[str] = None
+) -> list[str]:
     if userspace:
         arguments.append("--userspace")
+    if udid:
+        arguments.extend(["--udid", udid])
     return arguments
 
 
-def play_arguments(executable: str, route: Path, *, userspace: bool = False) -> list[str]:
+def play_arguments(
+    executable: str,
+    route: Path,
+    *,
+    userspace: bool = False,
+    udid: Optional[str] = None,
+) -> list[str]:
     return _with_device_options(
         [
             executable,
@@ -48,12 +58,15 @@ def play_arguments(executable: str, route: Path, *, userspace: bool = False) -> 
             "play",
         ],
         userspace=userspace,
+        udid=udid,
     ) + [
         str(route.resolve()),
     ]
 
 
-def clear_arguments(executable: str, *, userspace: bool = False) -> list[str]:
+def clear_arguments(
+    executable: str, *, userspace: bool = False, udid: Optional[str] = None
+) -> list[str]:
     return _with_device_options(
         [
             executable,
@@ -63,11 +76,17 @@ def clear_arguments(executable: str, *, userspace: bool = False) -> list[str]:
             "clear",
         ],
         userspace=userspace,
+        udid=udid,
     )
 
 
 def set_arguments(
-    executable: str, latitude: float, longitude: float, *, userspace: bool = False
+    executable: str,
+    latitude: float,
+    longitude: float,
+    *,
+    userspace: bool = False,
+    udid: Optional[str] = None,
 ) -> list[str]:
     if not -90 <= latitude <= 90:
         raise PlaybackError(f"Latitude is outside [-90, 90]: {latitude}")
@@ -82,6 +101,7 @@ def set_arguments(
             "set",
         ],
         userspace=userspace,
+        udid=udid,
     ) + [
         "--",
         str(latitude),
@@ -89,8 +109,12 @@ def set_arguments(
     ]
 
 
-def clear_location(executable: str) -> int:
-    return subprocess.run(clear_arguments(executable), check=False).returncode
+def clear_location(
+    executable: str, *, userspace: bool = False, udid: Optional[str] = None
+) -> int:
+    return subprocess.run(
+        clear_arguments(executable, userspace=userspace, udid=udid), check=False
+    ).returncode
 
 
 def play_route(
@@ -99,6 +123,7 @@ def play_route(
     executable: Optional[str] = None,
     execute: bool = False,
     userspace: bool = False,
+    udid: Optional[str] = None,
     clear_on_interrupt: bool = True,
 ) -> PlaybackResult:
     route_name, points = parse_track(route)
@@ -106,12 +131,16 @@ def play_route(
         raise PlaybackError(f"Route {route_name!r} must contain at least two points")
 
     command_executable = executable or shutil.which("pymobiledevice3") or "pymobiledevice3"
-    arguments = play_arguments(command_executable, route, userspace=userspace)
+    arguments = play_arguments(
+        command_executable, route, userspace=userspace, udid=udid
+    )
     if not execute:
         return PlaybackResult(tuple(arguments), None, False)
 
     command_executable = resolve_executable(executable)
-    arguments = play_arguments(command_executable, route, userspace=userspace)
+    arguments = play_arguments(
+        command_executable, route, userspace=userspace, udid=udid
+    )
     process = subprocess.Popen(arguments)
     try:
         return PlaybackResult(tuple(arguments), process.wait(), True)
@@ -123,19 +152,23 @@ def play_route(
             process.kill()
             process.wait()
         if clear_on_interrupt:
-            clear_location(command_executable)
+            clear_location(command_executable, userspace=userspace, udid=udid)
         return PlaybackResult(tuple(arguments), 130, True)
 
 
 def clear_route_location(
-    *, executable: Optional[str] = None, execute: bool = False, userspace: bool = False
+    *,
+    executable: Optional[str] = None,
+    execute: bool = False,
+    userspace: bool = False,
+    udid: Optional[str] = None,
 ) -> PlaybackResult:
     command_executable = executable or shutil.which("pymobiledevice3") or "pymobiledevice3"
-    arguments = clear_arguments(command_executable, userspace=userspace)
+    arguments = clear_arguments(command_executable, userspace=userspace, udid=udid)
     if not execute:
         return PlaybackResult(tuple(arguments), None, False)
     command_executable = resolve_executable(executable)
-    arguments = clear_arguments(command_executable, userspace=userspace)
+    arguments = clear_arguments(command_executable, userspace=userspace, udid=udid)
     return PlaybackResult(
         tuple(arguments),
         subprocess.run(arguments, check=False).returncode,
@@ -150,15 +183,18 @@ def set_route_location(
     executable: Optional[str] = None,
     execute: bool = False,
     userspace: bool = False,
+    udid: Optional[str] = None,
 ) -> PlaybackResult:
     command_executable = executable or shutil.which("pymobiledevice3") or "pymobiledevice3"
     arguments = set_arguments(
-        command_executable, latitude, longitude, userspace=userspace
+        command_executable, latitude, longitude, userspace=userspace, udid=udid
     )
     if not execute:
         return PlaybackResult(tuple(arguments), None, False)
     command_executable = resolve_executable(executable)
-    arguments = set_arguments(command_executable, latitude, longitude, userspace=userspace)
+    arguments = set_arguments(
+        command_executable, latitude, longitude, userspace=userspace, udid=udid
+    )
     return PlaybackResult(
         tuple(arguments),
         subprocess.run(arguments, check=False).returncode,

@@ -563,7 +563,7 @@ def track_xml(name: str, points: Sequence[RoutePoint]) -> str:
     validate_points(points)
     root = ET.Element(
         f"{{{GPX_NAMESPACE}}}gpx",
-        {"version": "1.1", "creator": "iPhone Route Controller"},
+        {"version": "1.1", "creator": "Central Blue Route Controller"},
     )
     track = ET.SubElement(root, f"{{{GPX_NAMESPACE}}}trk")
     ET.SubElement(track, f"{{{GPX_NAMESPACE}}}name").text = name

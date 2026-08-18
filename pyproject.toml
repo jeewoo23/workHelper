@@ -5,14 +5,17 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "iphone-route-controller"
 version = "0.1.0"
-description = "Local route preparation and safe playback controls for a tethered iPhone."
+description = "Local route preparation and safe playback controls for a tethered iPhone or iPad."
 readme = "README.md"
 requires-python = ">=3.9"
 dependencies = []
 
 [project.optional-dependencies]
 dev = ["pytest>=8,<9"]
-device = ["pymobiledevice3>=9,<10"]
+device = [
+    "cryptography<49",
+    "pymobiledevice3>=9,<10",
+]
 
 [project.scripts]
 route-controller = "route_controller.cli:main"

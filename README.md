@@ -1,7 +1,7 @@
-# iPhone Route Controller
+# Central Blue Route Controller
 
 A local macOS development tool for preparing and playing timed GPX routes on a
-tethered physical iPhone.
+tethered physical iPhone or iPad.
 
 The project contains the complete Phase 3 route-building workflow from
 [the build specification](docs/BUILD_SPEC.md):
@@ -10,14 +10,14 @@ The project contains the complete Phase 3 route-building workflow from
 - Convert Xcode waypoint GPX (`wpt`) into timed track GPX (`trkpt`).
 - Validate the L1 → L2 and L2 → L1 route halves.
 - Produce safe, dry-run-first playback and clear commands.
-- Run a loopback-only backend for frontend-driven iPhone playback.
+- Run a loopback-only backend for frontend-driven iPhone or iPad playback.
 - Import arbitrary GPX geometry and prepare it for physical-device playback.
 - Apply source or road-aware timing so highway and local-road segments retain
   different relative speeds.
 - Build road-following routes from coordinates or coordinate-based Google Maps
   directions links.
 
-The CLI does not modify a connected phone unless `--execute` is explicitly
+The CLI does not modify a connected device unless `--execute` is explicitly
 provided.
 
 ## Run the local controller
@@ -36,7 +36,38 @@ http://localhost:8765/
 
 This starts the loopback-only Python backend and serves the Cesium frontend.
 When the backend is running, the start, pause, stop, and clear controls operate
-on the tethered iPhone through `pymobiledevice3`.
+on the selected tethered device through `pymobiledevice3`.
+
+## Connect an iPhone or iPad
+
+The initial supported device scope is USB-connected iPhone and iPad hardware
+running iOS/iPadOS 17.4 or later. Unlock the device, approve **Trust This
+Computer**, enable Developer Mode, and mount its matching developer image:
+
+```bash
+uv run --extra device pymobiledevice3 lockdown pair
+uv run --extra device pymobiledevice3 amfi developer-mode-status
+uv run --extra device pymobiledevice3 amfi reveal-developer-mode
+```
+
+Run `reveal-developer-mode` only when the status is `false` and the Developer
+Mode toggle is absent. Then open **Settings > Privacy & Security > Developer
+Mode** on the device, enable it, restart, and confirm the post-restart prompt.
+Finally mount the developer image:
+
+```bash
+uv run --extra device pymobiledevice3 mounter auto-mount
+```
+
+Central Blue discovers devices with `usbmux list --usb`. One compatible device
+is selected automatically. When multiple compatible devices are connected,
+choose the intended device from the **Device Link** selector before using set,
+play, or clear. Every command is then pinned to that device's UDID; disconnecting
+it blocks new commands instead of falling back to another connected device.
+
+See [the physical iPad acceptance test](docs/IPAD_COMPATIBILITY.md#physical-ipad-acceptance-test)
+before promoting a particular iPad model and iPadOS build from expected
+compatibility to physically verified support.
 
 The frontend loads the GPX route into a Cesium map backed by OpenStreetMap.
 No Cesium ion access token is required, but the map needs an internet
@@ -75,7 +106,7 @@ remaining-minutes control.
 
 Each saved import has a **Delete** control. After confirmation, deletion removes
 the saved source GPX, its generated playback track, and its custom route-registry
-entry. Deletion is blocked while that route is active on the phone and cannot be
+entry. Deletion is blocked while that route is active on the device and cannot be
 undone.
 
 The left route library is organized into **Home and Work**, **Import GPX**, and
@@ -116,14 +147,14 @@ track under `routes/generated/` and registers it as a custom route. Dense or
 duplicate source timestamps are resampled into strictly increasing playback
 timestamps while retaining the exact route endpoints and relative speed
 profile. Only successfully prepared imports become eligible for **Start on
-phone**. Preparing the same import again rebuilds its track and timing profile.
+device**. Preparing the same import again rebuilds its track and timing profile.
 
 ## Build a route from coordinates
 
 Open **Build Route** in the route library to create road-following geometry
 without first exporting a GPX file. Each endpoint can come from:
 
-- **SIM** — the current simulated iPhone position shown by the app.
+- **SIM** — the current simulated device position shown by the app.
 - **MAC** — browser Location Services on the Mac.
 - **MAP** — the next point clicked on the Cesium map.
 - Manually entered decimal latitude and longitude.
@@ -131,8 +162,8 @@ without first exporting a GPX file. Each endpoint can come from:
 Press **Generate Preview** to request full driving geometry and ETA from OSRM.
 The resulting timed GPX is saved with the imported routes and opened in Cesium.
 Review it, then press **Prepare** under **Import GPX** to create the half-second
-phone playback track. Route generation alone never starts or changes the
-iPhone location.
+device playback track. Route generation alone never starts or changes the
+connected device's location.
 
 Requested origin and destination pins retain seven decimal places and remain
 visible separately from OSRM's road-snapped route endpoints. When endpoints are
@@ -150,8 +181,8 @@ Open **Coordinates** and use **Set Simulated Position** under the live simulated
 readout. Enter decimal latitude and longitude, or press **Pick on Map** and
 click a point on the Cesium map. A map click only fills the coordinate fields
 and displays a **Static Target** marker; press **Activate** to send that location
-to the phone. The loopback backend validates the coordinate and sends the
-static location to the connected iPhone through `pymobiledevice3`.
+to the device. The loopback backend validates the coordinate and sends the
+static location to the selected iPhone or iPad through `pymobiledevice3`.
 
 Static activation is disabled while a route is playing. Starting a route
 replaces the static position, and **Clear Location** restores real GPS. The
@@ -171,20 +202,20 @@ latitude/longitude coordinates, copy the directions link, then paste it into
 Press **Load Link**. The backend safely expands Google-owned redirects,
 extracts the coordinate endpoints, requests fresh road geometry and ETA from
 OSRM, saves the timed source GPX, and opens the preview. Review the route under
-**Import GPX**, then press **Prepare** before starting it on the phone.
+**Import GPX**, then press **Prepare** before starting it on the device.
 
 Phase 3 intentionally does not geocode place names or addresses. A link such as
 “Stanford to Berkeley” produces an actionable message asking for a
 coordinate-based link or manual endpoints; natural-language and named-place
 resolution belong to Phase 4. Central Blue does not scrape Google route
-geometry, and pasting a link never starts phone simulation.
+geometry, and pasting a link never starts device simulation.
 
 Generated-route metadata is stored locally beside its GPX source, including
 the provider, ETA, distance, requested endpoints, and source kind. Those
 details remain available after refresh and are removed with the route.
 
 See [Phase 3 acceptance](docs/PHASE_3_ACCEPTANCE.md) for the automated checks
-and the final tethered-iPhone verification.
+and the final tethered-device verification.
 
 ## Development setup
 
@@ -199,7 +230,7 @@ uv run pytest
 
 ```bash
 uv sync --extra dev --extra device
-uv run route-controller verify --probe-device
+uv run --extra device route-controller verify --probe-device
 ```
 
 The probe is read-only. It lists USB-connected devices.
@@ -207,23 +238,23 @@ The probe is read-only. It lists USB-connected devices.
 After a device is detected, preview a static-location command:
 
 ```bash
-uv run route-controller set 37.3835546 -122.1371287
+uv run --extra device route-controller set 37.3835546 -122.1371287
 ```
 
 Add `--execute` only when you intentionally want to perform the device test,
 then restore real location immediately afterward:
 
 ```bash
-uv run route-controller set 37.3835546 -122.1371287 --execute
-uv run route-controller clear --execute
+uv run --extra device route-controller set 37.3835546 -122.1371287 --execute
+uv run --extra device route-controller clear --execute
 ```
 
 If `pymobiledevice3` reports that it is trying `tunneld` on an iOS 17+
 device, retry with the no-root userspace tunnel:
 
 ```bash
-uv run route-controller set 37.3835546 -122.1371287 --userspace --execute
-uv run route-controller clear --userspace --execute
+uv run --extra device route-controller set 37.3835546 -122.1371287 --userspace --execute
+uv run --extra device route-controller clear --userspace --execute
 ```
 
 ## Inspect the generated routes
@@ -243,27 +274,27 @@ points over 1,200 seconds.
 Preview the exact command first:
 
 ```bash
-uv run route-controller play routes/tracks/route_L1_to_L2.track.gpx
+uv run --extra device route-controller play routes/tracks/route_L1_to_L2.track.gpx
 ```
 
 Only after device discovery and static-location testing succeed, explicitly
 run playback:
 
 ```bash
-uv run route-controller play routes/tracks/route_L1_to_L2.track.gpx --execute
+uv run --extra device route-controller play routes/tracks/route_L1_to_L2.track.gpx --execute
 ```
 
 If the static-location proof needed `--userspace`, use it for route playback
 too:
 
 ```bash
-uv run route-controller play routes/tracks/route_L1_to_L2.track.gpx --userspace --execute
+uv run --extra device route-controller play routes/tracks/route_L1_to_L2.track.gpx --userspace --execute
 ```
 
-Restore the phone's real location:
+Restore the device's real location:
 
 ```bash
-uv run route-controller clear --execute
+uv run --extra device route-controller clear --execute
 ```
 
 On current `pymobiledevice3`, iOS 17.4+ normally uses an automatic no-root
