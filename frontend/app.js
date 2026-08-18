@@ -22,6 +22,7 @@ const state = {
     deviceReport: null,
     routes: [],
     playback: { state: "idle" },
+    llm: null,
     selectingDevice: false,
     error: "",
     mode: "preview"
@@ -39,7 +40,8 @@ const state = {
     point: null,
     draftPoint: null,
     pickMode: false,
-    error: ""
+    error: "",
+    watchdog: null
   },
   routeBuilder: {
     status: "idle",
@@ -50,6 +52,12 @@ const state = {
     destinationLabel: "Destination",
     pickTarget: null,
     lastMetadata: null
+  },
+  itineraryPlanner: {
+    status: "idle",
+    error: "",
+    review: null,
+    confirmedPlaceIds: new Set()
   },
   trackSimulatedLocation: false,
   mapRouteGeometry: {
@@ -76,6 +84,12 @@ const fmt = new Intl.NumberFormat("en-US", {
   maximumFractionDigits: 7
 });
 const pad = number => String(number).padStart(2, "0");
+const localDateInputValue = () => {
+  const now = new Date();
+  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+};
+const browserTimezone = () => Intl.DateTimeFormat().resolvedOptions().timeZone
+  || "America/Los_Angeles";
 const durationText = seconds => `${pad(Math.floor(seconds / 60))}:${pad(Math.floor(seconds % 60))}`;
 const destinationName = () => state.direction === "imported"
   ? state.importedRoute.metadata?.destinationLabel || "END"
@@ -706,6 +720,28 @@ function renderShell() {
                   </div>
                 </details>
 
+                <details class="sidebar-section" data-sidebar-section="itinerary-planner">
+                  <summary><span>PLAN FROM DESCRIPTION</span><b>AI + GPX</b></summary>
+                  <div class="sidebar-section-body itinerary-planner">
+                    <label class="itinerary-description">
+                      <span>DESCRIBE YOUR DAY HOUR BY HOUR</span>
+                      <textarea data-itinerary-input="description" maxlength="10000" rows="6" placeholder="Start at home at 7 AM, drive to the office at 8, stay until 5 PM, then drive home…"></textarea>
+                    </label>
+                    <div class="itinerary-context">
+                      <label><span>DATE</span><input data-itinerary-input="date" type="date" value="${localDateInputValue()}"></label>
+                      <label><span>TIMEZONE</span><input data-itinerary-input="timezone" type="text" maxlength="80" value="${browserTimezone()}"></label>
+                    </div>
+                    <button class="secondary itinerary-interpret" type="button" data-action="interpret-itinerary">INTERPRET SCHEDULE</button>
+                    <div class="builder-feedback" data-live-card="itinerary" aria-live="polite">
+                      <strong data-live="itinerary-status">Describe a day to build a timed route</strong>
+                      <span data-live="itinerary-detail">The AI structures the schedule; coordinates and GPX are handled deterministically.</span>
+                    </div>
+                    <div class="itinerary-review" data-itinerary-review hidden></div>
+                    <button class="secondary itinerary-build" type="button" data-action="build-itinerary" hidden>CONFIRM PLACES &amp; BUILD GPX</button>
+                    <em class="builder-privacy">Your description is sent to OpenAI. Place searches are sent to the configured geocoder. Review every match before GPX generation.</em>
+                  </div>
+                </details>
+
                 <details class="sidebar-section" data-sidebar-section="import-gpx">
                   <summary><span>IMPORT GPX</span><b data-live="import-total">0</b></summary>
                   <div class="sidebar-section-body">
@@ -911,6 +947,14 @@ function bindControls() {
   document.querySelector('[data-action="generate-google-maps"]').addEventListener(
     "click",
     generateGoogleMapsPreview
+  );
+  document.querySelector('[data-action="interpret-itinerary"]').addEventListener(
+    "click",
+    interpretItinerary
+  );
+  document.querySelector('[data-action="build-itinerary"]').addEventListener(
+    "click",
+    buildConfirmedItinerary
   );
   document.querySelector("[data-imported-route-list]").addEventListener("click", event => {
     const deleteButton = event.target.closest("[data-delete-import]");
@@ -1382,6 +1426,190 @@ function updateRouteBuilderPanel() {
   }
 }
 
+async function interpretItinerary() {
+  const description = document.querySelector(
+    '[data-itinerary-input="description"]'
+  )?.value.trim() || "";
+  const date = document.querySelector('[data-itinerary-input="date"]')?.value || "";
+  const timezone = document.querySelector(
+    '[data-itinerary-input="timezone"]'
+  )?.value.trim() || "";
+  if (!description) {
+    state.itineraryPlanner.status = "error";
+    state.itineraryPlanner.error = "Describe where you will be and when you travel.";
+    updateItineraryPanel();
+    return;
+  }
+  if (!state.backend.available || !supportsBackendCapability("itineraryPlanning")) {
+    state.itineraryPlanner.status = "error";
+    state.itineraryPlanner.error = "Start or restart the local controller to enable itinerary planning.";
+    updateItineraryPanel();
+    return;
+  }
+  if (!state.backend.llm?.configured) {
+    state.itineraryPlanner.status = "error";
+    state.itineraryPlanner.error = "Set OPENAI_API_KEY in the terminal, then restart the controller.";
+    updateItineraryPanel();
+    return;
+  }
+
+  state.itineraryPlanner.status = "interpreting";
+  state.itineraryPlanner.error = "";
+  state.itineraryPlanner.review = null;
+  state.itineraryPlanner.confirmedPlaceIds = new Set();
+  updateItineraryPanel();
+  try {
+    state.itineraryPlanner.review = await apiRequest(
+      "/api/itineraries/interpret",
+      {
+        method: "POST",
+        body: JSON.stringify({ description, date, timezone })
+      }
+    );
+    state.itineraryPlanner.status = "review";
+  } catch (error) {
+    state.itineraryPlanner.status = "error";
+    state.itineraryPlanner.error = error.message || "The schedule could not be interpreted.";
+  }
+  updateItineraryPanel();
+}
+
+async function buildConfirmedItinerary() {
+  const planner = state.itineraryPlanner;
+  const places = planner.review?.resolvedPlaces || [];
+  if (!places.length || places.some(place => !planner.confirmedPlaceIds.has(place.id))) {
+    planner.status = "error";
+    planner.error = "Confirm every resolved place before building the GPX.";
+    updateItineraryPanel();
+    return;
+  }
+  if (isDevicePlaybackActive()) {
+    planner.status = "error";
+    planner.error = "Stop device playback before generating another route.";
+    updateItineraryPanel();
+    return;
+  }
+
+  planner.status = "building";
+  planner.error = "";
+  updateItineraryPanel();
+  try {
+    const response = await apiRequest("/api/routes/from-itinerary", {
+      method: "POST",
+      body: JSON.stringify({
+        confirmed: true,
+        itinerary: planner.review.itinerary,
+        resolvedPlaces: places
+      })
+    });
+    acceptGeneratedRoutePreview(response);
+    planner.status = "ready";
+    planner.error = "";
+  } catch (error) {
+    planner.status = "error";
+    planner.error = error.message || "The itinerary GPX could not be generated.";
+  }
+  updateItineraryPanel();
+}
+
+function updateItineraryPanel() {
+  const planner = state.itineraryPlanner;
+  const card = document.querySelector('[data-live-card="itinerary"]');
+  const interpretButton = document.querySelector('[data-action="interpret-itinerary"]');
+  const buildButton = document.querySelector('[data-action="build-itinerary"]');
+  const review = document.querySelector("[data-itinerary-review]");
+  if (!card || !interpretButton || !buildButton || !review) return;
+
+  const busy = ["interpreting", "building"].includes(planner.status);
+  const places = planner.review?.resolvedPlaces || [];
+  const allConfirmed = places.length > 0
+    && places.every(place => planner.confirmedPlaceIds.has(place.id));
+  card.classList.toggle("ready", ["review", "ready"].includes(planner.status));
+  card.classList.toggle("error", planner.status === "error");
+  card.classList.toggle("loading", busy);
+  interpretButton.disabled = busy || isDevicePlaybackActive()
+    || !state.backend.available
+    || !supportsBackendCapability("itineraryPlanning");
+  interpretButton.textContent = planner.status === "interpreting"
+    ? "INTERPRETING…"
+    : "INTERPRET SCHEDULE";
+  document.querySelectorAll("[data-itinerary-input]").forEach(input => {
+    input.disabled = busy || isDevicePlaybackActive();
+  });
+
+  review.hidden = !places.length;
+  buildButton.hidden = !places.length;
+  buildButton.disabled = busy || !allConfirmed || isDevicePlaybackActive();
+  buildButton.textContent = planner.status === "building"
+    ? "BUILDING GPX…"
+    : "CONFIRM PLACES & BUILD GPX";
+  if (places.length) {
+    const segments = planner.review.itinerary?.segments || [];
+    const placeLabels = new Map(
+      (planner.review.itinerary?.places || []).map(place => [place.id, place.label])
+    );
+    review.innerHTML = `
+      <div class="itinerary-review-heading">
+        <strong>${escapeHtml(planner.review.itinerary?.name || "Interpreted schedule")}</strong>
+        <span>${segments.length} segments · ${escapeHtml(planner.review.itinerary?.timezone || "")}</span>
+      </div>
+      <div class="itinerary-timeline">
+        ${segments.map(segment => {
+          const start = String(segment.start || "").slice(11, 16);
+          const end = String(segment.end || "").slice(11, 16);
+          const activity = segment.kind === "stay"
+            ? `Stay at ${placeLabels.get(segment.placeId) || segment.placeId}`
+            : `Drive ${placeLabels.get(segment.originId) || segment.originId} → ${placeLabels.get(segment.destinationId) || segment.destinationId}`;
+          return `<div><code>${escapeHtml(start)}–${escapeHtml(end)}</code><span>${escapeHtml(activity)}</span></div>`;
+        }).join("")}
+      </div>
+      ${places.map(place => `
+        <label class="itinerary-place">
+          <input type="checkbox" data-itinerary-confirm="${escapeHtml(place.id)}"${planner.confirmedPlaceIds.has(place.id) ? " checked" : ""}>
+          <span>
+            <strong>${escapeHtml(place.label)}</strong>
+            <small>${escapeHtml(place.displayName)}</small>
+            <code>${Number(place.latitude).toFixed(6)}, ${Number(place.longitude).toFixed(6)}</code>
+          </span>
+        </label>`).join("")}
+      ${(planner.review.itinerary?.assumptions || []).length ? `
+        <div class="itinerary-assumptions"><strong>ASSUMPTIONS</strong>${planner.review.itinerary.assumptions.map(value => `<span>${escapeHtml(value)}</span>`).join("")}</div>` : ""}`;
+    review.querySelectorAll("[data-itinerary-confirm]").forEach(input => {
+      input.addEventListener("change", () => {
+        if (input.checked) planner.confirmedPlaceIds.add(input.dataset.itineraryConfirm);
+        else planner.confirmedPlaceIds.delete(input.dataset.itineraryConfirm);
+        updateItineraryPanel();
+      });
+    });
+  }
+
+  if (planner.status === "interpreting") {
+    setText("itinerary-status", "Interpreting your schedule");
+    setText("itinerary-detail", "OpenAI is producing a strict stay-and-travel timeline.");
+  } else if (planner.status === "building") {
+    setText("itinerary-status", "Building timed road geometry");
+    setText("itinerary-detail", "Stationary hours stay sparse while travel follows the road network.");
+  } else if (planner.status === "review") {
+    setText("itinerary-status", "Review every resolved place");
+    setText("itinerary-detail", "Check each match below. Reword the description and interpret again if one is wrong.");
+  } else if (planner.status === "ready") {
+    setText("itinerary-status", "Timed itinerary GPX is ready");
+    setText("itinerary-detail", "It is selected under Import GPX; prepare it to preserve its sparse source timing.");
+  } else if (planner.status === "error") {
+    setText("itinerary-status", "Itinerary needs attention");
+    setText("itinerary-detail", planner.error);
+  } else if (!state.backend.available) {
+    setText("itinerary-status", "Local backend required");
+    setText("itinerary-detail", "Start the controller to use natural-language itinerary planning.");
+  } else if (!state.backend.llm?.configured) {
+    setText("itinerary-status", "OpenAI key not configured");
+    setText("itinerary-detail", "Set OPENAI_API_KEY in the terminal and restart the controller.");
+  } else {
+    setText("itinerary-status", "Describe a day to build a timed route");
+    setText("itinerary-detail", `Using ${state.backend.llm.model || "the configured OpenAI model"}; every place requires confirmation.`);
+  }
+}
+
 function formatDistance(meters) {
   if (!Number.isFinite(meters) || meters <= 0) return "—";
   const miles = meters / 1609.344;
@@ -1456,6 +1684,7 @@ async function refreshBackendStatus() {
     state.backend.apiVersion = Number(payload.apiVersion) || 1;
     state.backend.capabilities = payload.capabilities || {};
     state.backend.deviceReport = payload.device || null;
+    state.backend.llm = payload.llm || null;
     state.backend.device = parseDevice(payload.device);
     renderDeviceSelector(payload.device);
     state.backend.playback = payload.playback || { state: "idle" };
@@ -1466,20 +1695,32 @@ async function refreshBackendStatus() {
       && Number.isFinite(simulatedLocation.longitude)
       && state.staticLocation.status !== "activating"
     ) {
-      state.staticLocation.status = "active";
+      state.staticLocation.status = simulatedLocation.state === "recovering"
+        ? "recovering"
+        : "active";
       state.staticLocation.point = {
         lat: simulatedLocation.latitude,
         lon: simulatedLocation.longitude
       };
+      state.staticLocation.watchdog = {
+        heartbeatIntervalSeconds: simulatedLocation.heartbeatIntervalSeconds,
+        lastReassertedAt: simulatedLocation.lastReassertedAt,
+        reassertionCount: simulatedLocation.reassertionCount,
+        preventingIdleSleep: simulatedLocation.preventingIdleSleep,
+        powerWarning: simulatedLocation.powerWarning || ""
+      };
       state.staticLocation.error = "";
     } else if (
       !simulatedLocation
-      && state.staticLocation.status === "active"
+      && ["active", "recovering"].includes(state.staticLocation.status)
     ) {
       state.staticLocation.status = "idle";
       state.staticLocation.point = null;
+      state.staticLocation.watchdog = null;
     }
-    state.backend.error = state.backend.playback.error?.message || "";
+    state.backend.error = state.backend.playback.error?.message
+      || state.backend.playback.powerWarning
+      || "";
     syncBackendPlayback();
   } catch (error) {
     state.backend.available = false;
@@ -1487,11 +1728,13 @@ async function refreshBackendStatus() {
     state.backend.capabilities = {};
     state.backend.device = null;
     state.backend.deviceReport = null;
+    state.backend.llm = null;
     state.backend.error = "";
     state.backend.playback = { state: "idle" };
-    if (state.staticLocation.status === "active") {
+    if (["active", "recovering"].includes(state.staticLocation.status)) {
       state.staticLocation.status = "idle";
       state.staticLocation.point = null;
+      state.staticLocation.watchdog = null;
     }
   }
   updateLiveState();
@@ -1563,7 +1806,7 @@ function renderDeviceSelector(report) {
   ].join("");
   if (selector.innerHTML !== options) selector.innerHTML = options;
   selector.disabled = state.backend.selectingDevice || isDevicePlaybackActive()
-    || state.staticLocation.status === "active";
+    || ["active", "recovering"].includes(state.staticLocation.status);
 }
 
 async function selectDevice(deviceId) {
@@ -1658,6 +1901,8 @@ function renderImportedRouteList() {
       || metadata.filename;
     const sourceLabel = metadata.sourceType === "google-maps"
       ? "Google Maps"
+      : metadata.sourceType === "llm-itinerary"
+        ? "AI itinerary"
       : metadata.sourceType === "directions"
         ? "Generated"
         : "Imported";
@@ -1722,7 +1967,7 @@ function updateImportPanel() {
     setText("import-status", metadata.name || metadata.originalFilename || "Imported route");
     setText(
       "import-detail",
-      `${metadata.pointCount.toLocaleString()} points · ${["directions", "google-maps"].includes(metadata.sourceType) ? `${metadata.provider} ${formatDistance(metadata.distanceMeters)} ETA ${durationMinutes(metadata.estimatedDurationSeconds)}` : prepared ? `${timingModeLabel(prepared)} ${durationMinutes(prepared.durationSeconds)}` : metadata.hasTimestamps ? "timestamps available" : "road timing available when prepared"} · saved as ${metadata.filename}`
+      `${metadata.pointCount.toLocaleString()} points · ${["directions", "google-maps", "llm-itinerary"].includes(metadata.sourceType) ? `${metadata.provider} ${formatDistance(metadata.distanceMeters)} ${metadata.sourceType === "llm-itinerary" ? `schedule ${durationMinutes(metadata.estimatedDurationSeconds)}` : `ETA ${durationMinutes(metadata.estimatedDurationSeconds)}`}` : prepared ? `${timingModeLabel(prepared)} ${durationMinutes(prepared.durationSeconds)}` : metadata.hasTimestamps ? "timestamps available" : "road timing available when prepared"} · saved as ${metadata.filename}`
     );
   } else if (imported.status === "error") {
     setText("import-status", "Import failed");
@@ -1879,6 +2124,7 @@ function syncBackendPlayback() {
     state.staticLocation.draftPoint = null;
     state.staticLocation.pickMode = false;
     state.staticLocation.error = "";
+    state.staticLocation.watchdog = null;
     if (state.viewer && !state.viewer.isDestroyed()) {
       state.viewer.scene.canvas.style.cursor = "";
       syncStaticLocationTargetMarker();
@@ -1907,6 +2153,7 @@ async function toggleDevicePlayback() {
       state.staticLocation.draftPoint = null;
       state.staticLocation.pickMode = false;
       state.staticLocation.error = "";
+      state.staticLocation.watchdog = null;
       state.backend.mode = "device";
       state.backend.playback = await apiRequest(`/api/routes/${routeId()}/start`, { method: "POST" });
     }
@@ -1926,6 +2173,7 @@ async function stopDevicePlayback() {
     state.staticLocation.draftPoint = null;
     state.staticLocation.pickMode = false;
     state.staticLocation.error = "";
+    state.staticLocation.watchdog = null;
     state.playing = false;
     state.progress = 0;
   } catch (error) {
@@ -1943,6 +2191,7 @@ async function clearDeviceLocation() {
     state.staticLocation.draftPoint = null;
     state.staticLocation.pickMode = false;
     state.staticLocation.error = "";
+    state.staticLocation.watchdog = null;
     if (state.viewer && !state.viewer.isDestroyed()) {
       state.viewer.scene.canvas.style.cursor = "";
       syncStaticLocationTargetMarker();
@@ -2068,6 +2317,13 @@ async function activateStaticLocation() {
     };
     state.staticLocation.draftPoint = null;
     state.staticLocation.error = "";
+    state.staticLocation.watchdog = {
+      heartbeatIntervalSeconds: activated.heartbeatIntervalSeconds,
+      lastReassertedAt: activated.lastReassertedAt,
+      reassertionCount: activated.reassertionCount,
+      preventingIdleSleep: activated.preventingIdleSleep,
+      powerWarning: activated.powerWarning || ""
+    };
     state.backend.error = "";
     state.playing = false;
     state.progress = 0;
@@ -2115,7 +2371,7 @@ function updateStaticLocationPanel() {
     || !state.backend.available
     || !capable
     || !isDeviceControllable();
-  card.classList.toggle("active", status === "active");
+  card.classList.toggle("active", ["active", "recovering"].includes(status));
   card.classList.toggle("error", status === "error");
   card.classList.toggle(
     "loading",
@@ -2141,8 +2397,26 @@ function updateStaticLocationPanel() {
     note = "Click one point on the Cesium map to fill the coordinate fields.";
   } else if (state.staticLocation.draftPoint) {
     note = `${coordinateText(state.staticLocation.draftPoint)} selected · press Activate`;
-  } else if (status === "active" && state.staticLocation.point) {
-    note = `Active at ${coordinateText(state.staticLocation.point)}`;
+  } else if (["active", "recovering"].includes(status) && state.staticLocation.point) {
+    const watchdog = state.staticLocation.watchdog;
+    const intervalMinutes = Math.max(
+      1,
+      Math.round((Number(watchdog?.heartbeatIntervalSeconds) || 300) / 60)
+    );
+    const lastReasserted = watchdog?.lastReassertedAt
+      ? new Date(watchdog.lastReassertedAt).toLocaleTimeString([], {
+          hour: "numeric",
+          minute: "2-digit",
+          second: "2-digit"
+        })
+      : "pending";
+    if (status === "recovering") {
+      note = `Reconnecting to the device · last reasserted ${lastReasserted}`;
+    } else if (watchdog?.powerWarning) {
+      note = `Active at ${coordinateText(state.staticLocation.point)} · ${watchdog.powerWarning}`;
+    } else {
+      note = `Active at ${coordinateText(state.staticLocation.point)} · reasserts every ${intervalMinutes} min · last ${lastReasserted}`;
+    }
   } else if (!state.backend.available) {
     note = "Start the local controller before activating a position.";
   } else if (!capable) {
@@ -2701,7 +2975,7 @@ function updateLiveState() {
     : null;
   const previewWithoutDevice = state.backend.available && !deviceOnline && !importedPreview;
   const backendError = state.backend.error;
-  const staticActive = state.staticLocation.status === "active"
+  const staticActive = ["active", "recovering"].includes(state.staticLocation.status)
     && !!state.staticLocation.point;
   const status = state.backend.available && backendPlayback.state === "playing"
     ? `${deviceClass} traveling to ${destinationName()}`
@@ -2800,7 +3074,9 @@ function updateLiveState() {
   setText("backend-note", state.backend.error
     ? state.backend.error
     : staticActive
-      ? `${deviceClass} fixed at ${coordinateText(state.staticLocation.point)}`
+      ? state.staticLocation.status === "recovering"
+        ? `${deviceClass} static position is reconnecting`
+        : `${deviceClass} fixed at ${coordinateText(state.staticLocation.point)} · watchdog active`
     : importedPreview
       ? preparedImport
         ? deviceOnline
@@ -2861,6 +3137,7 @@ function updateLiveState() {
   });
   updateImportPanel();
   updateRouteBuilderPanel();
+  updateItineraryPanel();
   updateStaticLocationPanel();
   renderDeviceSelector(state.backend.deviceReport);
 

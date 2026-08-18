@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from threading import Lock, Thread
+from threading import Event, Lock, Thread
 from typing import Any, Callable, Optional
 from urllib.parse import unquote, urlparse
 
@@ -42,6 +42,21 @@ from .google_maps import (
     GoogleMapsLinkValidationError,
     resolve_google_maps_directions_link,
 )
+from .itinerary import (
+    GeocodingError,
+    ItineraryPlanner,
+    ItineraryProviderError,
+    ItineraryValidationError,
+    NominatimGeocoder,
+    OpenAIItineraryPlanner,
+    PlaceGeocoder,
+    compose_itinerary,
+    itinerary_payload,
+    parse_itinerary,
+    parse_resolved_places,
+    resolved_place_payload,
+    validate_planner_request,
+)
 from .playback import (
     clear_arguments,
     play_arguments,
@@ -70,14 +85,30 @@ DEFAULT_TIMING_PROVIDER = OsrmRouteTimingProvider(
 DEFAULT_DIRECTIONS_PROVIDER = OsrmDirectionsProvider(
     os.environ.get("ROUTE_CONTROLLER_OSRM_URL") or DEFAULT_OSRM_URL
 )
+_OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "").strip()
+DEFAULT_ITINERARY_PLANNER: Optional[ItineraryPlanner] = (
+    OpenAIItineraryPlanner(
+        _OPENAI_API_KEY,
+        model=os.environ.get("ROUTE_CONTROLLER_LLM_MODEL", "gpt-5.4-mini"),
+    )
+    if _OPENAI_API_KEY
+    else None
+)
+DEFAULT_GEOCODER: PlaceGeocoder = NominatimGeocoder(
+    IMPORTS_DIR / ".geocode-cache.json",
+    base_url=os.environ.get("ROUTE_CONTROLLER_GEOCODER_URL")
+    or "https://nominatim.openstreetmap.org",
+)
 BACKEND_CAPABILITIES = {
     "deleteImports": True,
     "deviceSelection": True,
     "directionsGeneration": True,
     "googleMapsLinks": True,
+    "itineraryPlanning": True,
     "nullableDuration": True,
     "routeAwareTiming": True,
     "staticLocation": True,
+    "staticLocationHeartbeat": True,
 }
 
 
@@ -90,6 +121,8 @@ class ActivePlayback:
     process: subprocess.Popen[str]
     device_id: str
     device_class: str
+    power_process: Optional[subprocess.Popen[str]] = None
+    power_warning: str = ""
     paused_at: Optional[float] = None
     total_paused_seconds: float = 0.0
 
@@ -127,10 +160,29 @@ class PlaybackManager:
         userspace: bool = True,
         registry: Optional[RouteRegistry] = None,
         device_provider: Optional[Callable[[], EnvironmentReport]] = None,
+        static_heartbeat_interval_seconds: float = 300,
+        static_watchdog_poll_seconds: float = 5,
+        process_startup_grace_seconds: float = 0.25,
     ) -> None:
         self._lock = Lock()
         self._active: Optional[ActivePlayback] = None
         self._static_process: Optional[subprocess.Popen[str]] = None
+        self._static_power_process: Optional[subprocess.Popen[str]] = None
+        self._static_power_warning = ""
+        self._static_stop_event: Optional[Event] = None
+        self._static_generation = 0
+        self._static_last_reasserted_at: Optional[str] = None
+        self._static_last_reasserted_monotonic: Optional[float] = None
+        self._static_reassertion_count = 0
+        self._static_heartbeat_interval_seconds = max(
+            0.01, float(static_heartbeat_interval_seconds)
+        )
+        self._static_watchdog_poll_seconds = max(
+            0.01, float(static_watchdog_poll_seconds)
+        )
+        self._process_startup_grace_seconds = max(
+            0.0, float(process_startup_grace_seconds)
+        )
         self._userspace = userspace
         self._last_error: Optional[dict[str, str]] = None
         self._static_location: Optional[dict[str, float]] = None
@@ -174,7 +226,7 @@ class PlaybackManager:
         with self._lock:
             self._reap_locked()
             self._reap_static_locked()
-            if self._active is not None or self._static_process is not None:
+            if self._active is not None or self._static_location is not None:
                 raise ApiError(
                     HTTPStatus.CONFLICT,
                     "Stop playback and clear the static location before changing devices",
@@ -302,6 +354,18 @@ class PlaybackManager:
                 device_id=target.identifier,
                 device_class=target.device_class,
             )
+            try:
+                self._active.power_process = subprocess.Popen(
+                    ["caffeinate", "-i", "-w", str(process.pid)],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    text=True,
+                )
+            except OSError as error:
+                self._active.power_process = None
+                self._active.power_warning = (
+                    f"Mac idle-sleep prevention could not start: {error}"
+                )
             self._static_location = None
             return self._status_locked()
 
@@ -332,7 +396,7 @@ class PlaybackManager:
         with self._lock:
             self._reap_locked()
             self._reap_static_locked()
-            static_process_active = self._static_process is not None
+            static_process_active = self._static_location is not None
             active = self._active
             if active is not None:
                 active.process.terminate()
@@ -341,6 +405,7 @@ class PlaybackManager:
                 except subprocess.TimeoutExpired:
                     active.process.kill()
                     active.process.wait(timeout=5)
+                self._stop_power_assertion(active)
                 self._active = None
                 stopped_active_process = True
 
@@ -405,70 +470,185 @@ class PlaybackManager:
                     code="playback_active",
                 )
             self._stop_static_locked()
-            command_executable = resolve_executable(None)
-            arguments = set_arguments(
-                command_executable,
-                latitude,
-                longitude,
-                userspace=self._userspace,
-                udid=target.identifier,
-            )
             try:
-                process = subprocess.Popen(
-                    arguments,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.PIPE,
-                    text=True,
+                process = self._launch_static_process_locked(
+                    target,
+                    latitude,
+                    longitude,
                 )
-            except OSError as error:
-                raise ApiError(
-                    HTTPStatus.BAD_GATEWAY,
-                    friendly_device_error(
-                        str(error),
-                        device_class=target.device_class,
-                        os_name=target.os_name,
-                    ),
-                    detail=str(error),
-                    code="device_set_failed",
-                ) from error
+            except ApiError:
+                self._stop_static_locked()
+                raise
             self._static_process = process
             self._static_device = target
             self._static_location = {
                 "latitude": latitude,
                 "longitude": longitude,
             }
-            time.sleep(0.25)
-            returncode = process.poll()
-            if returncode is not None:
-                raw_error = self._process_stderr(process)
-                self._static_process = None
-                self._static_device = None
-                self._static_location = None
-                message = friendly_device_error(
-                    raw_error or f"Static location exited with code {returncode}",
-                    device_class=target.device_class,
-                    os_name=target.os_name,
-                )
-                raise ApiError(
-                    HTTPStatus.BAD_GATEWAY,
-                    message,
-                    detail=raw_error,
-                    code="device_set_failed",
-                )
+            self._record_static_reassertion_locked()
+            self._ensure_static_power_assertion_locked()
+            self._static_generation += 1
+            generation = self._static_generation
+            stop_event = Event()
+            self._static_stop_event = stop_event
+            Thread(
+                target=self._static_watchdog,
+                args=(generation, stop_event),
+                daemon=True,
+                name="static-location-watchdog",
+            ).start()
             self._last_error = None
-            return {
-                "state": "active",
-                **self._static_location,
-            }
+            return self._simulated_location_locked()
 
-    def simulated_location(self) -> Optional[dict[str, float]]:
+    def simulated_location(self) -> Optional[dict[str, Any]]:
         with self._lock:
             self._reap_static_locked()
-            return (
-                dict(self._static_location)
-                if self._static_location is not None
-                else None
+            return self._simulated_location_locked()
+
+    def _launch_static_process_locked(
+        self,
+        target: DeviceTarget,
+        latitude: float,
+        longitude: float,
+    ) -> subprocess.Popen[str]:
+        command_executable = resolve_executable(None)
+        arguments = set_arguments(
+            command_executable,
+            latitude,
+            longitude,
+            userspace=self._userspace,
+            udid=target.identifier,
+        )
+        try:
+            process = subprocess.Popen(
+                arguments,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
             )
+        except OSError as error:
+            raise ApiError(
+                HTTPStatus.BAD_GATEWAY,
+                friendly_device_error(
+                    str(error),
+                    device_class=target.device_class,
+                    os_name=target.os_name,
+                ),
+                detail=str(error),
+                code="device_set_failed",
+            ) from error
+        if self._process_startup_grace_seconds:
+            time.sleep(self._process_startup_grace_seconds)
+        returncode = process.poll()
+        if returncode is not None:
+            raw_error = self._process_stderr(process)
+            message = friendly_device_error(
+                raw_error or f"Static location exited with code {returncode}",
+                device_class=target.device_class,
+                os_name=target.os_name,
+            )
+            raise ApiError(
+                HTTPStatus.BAD_GATEWAY,
+                message,
+                detail=raw_error,
+                code="device_set_failed",
+            )
+        return process
+
+    def _static_watchdog(self, generation: int, stop_event: Event) -> None:
+        while not stop_event.wait(self._static_watchdog_poll_seconds):
+            with self._lock:
+                if (
+                    generation != self._static_generation
+                    or self._static_stop_event is not stop_event
+                    or self._static_location is None
+                    or self._static_device is None
+                ):
+                    return
+                self._reap_static_locked()
+                self._ensure_static_power_assertion_locked()
+                elapsed = (
+                    time.monotonic() - self._static_last_reasserted_monotonic
+                    if self._static_last_reasserted_monotonic is not None
+                    else self._static_heartbeat_interval_seconds
+                )
+                if (
+                    self._static_process is None
+                    or elapsed >= self._static_heartbeat_interval_seconds
+                ):
+                    self._reassert_static_location_locked()
+
+    def _reassert_static_location_locked(self) -> None:
+        target = self._static_device
+        location = self._static_location
+        if target is None or location is None:
+            return
+        self._terminate_process(self._static_process)
+        self._static_process = None
+        try:
+            self._static_process = self._launch_static_process_locked(
+                target,
+                location["latitude"],
+                location["longitude"],
+            )
+        except ApiError as error:
+            self._last_error = {
+                "code": error.code,
+                "message": error.message,
+                "detail": error.detail,
+            }
+            return
+        self._record_static_reassertion_locked()
+        if self._last_error and self._last_error.get("code") == "device_set_failed":
+            self._last_error = None
+
+    def _record_static_reassertion_locked(self) -> None:
+        self._static_last_reasserted_monotonic = time.monotonic()
+        self._static_last_reasserted_at = (
+            datetime.now(timezone.utc)
+            .isoformat(timespec="seconds")
+            .replace("+00:00", "Z")
+        )
+        self._static_reassertion_count += 1
+
+    def _ensure_static_power_assertion_locked(self) -> None:
+        if (
+            self._static_power_process is not None
+            and self._static_power_process.poll() is None
+        ):
+            return
+        self._static_power_process = None
+        try:
+            self._static_power_process = subprocess.Popen(
+                ["caffeinate", "-i", "-w", str(os.getpid())],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                text=True,
+            )
+            self._static_power_warning = ""
+        except OSError as error:
+            self._static_power_warning = (
+                f"Mac idle-sleep prevention could not start: {error}"
+            )
+
+    def _simulated_location_locked(self) -> Optional[dict[str, Any]]:
+        if self._static_location is None:
+            return None
+        power_process = self._static_power_process
+        preventing_idle_sleep = (
+            power_process is not None and power_process.poll() is None
+        )
+        payload: dict[str, Any] = {
+            **self._static_location,
+            "state": "active" if self._static_process is not None else "recovering",
+            "heartbeatIntervalSeconds": self._static_heartbeat_interval_seconds,
+            "lastReassertedAt": self._static_last_reasserted_at,
+            "reassertionCount": self._static_reassertion_count,
+            "preventingIdleSleep": preventing_idle_sleep,
+        }
+        if self._static_power_warning:
+            payload["powerWarning"] = self._static_power_warning
+        return payload
 
     def _reap_static_locked(self) -> None:
         if self._static_process is None:
@@ -489,24 +669,35 @@ class PlaybackManager:
                 "detail": raw_error,
             }
         self._static_process = None
-        self._static_device = None
-        self._static_location = None
 
     def _stop_static_locked(self) -> None:
-        process = self._static_process
-        if process is None:
-            self._static_device = None
-            self._static_location = None
+        self._static_generation += 1
+        if self._static_stop_event is not None:
+            self._static_stop_event.set()
+        self._static_stop_event = None
+        self._terminate_process(self._static_process)
+        self._terminate_process(self._static_power_process, timeout=2)
+        self._static_process = None
+        self._static_power_process = None
+        self._static_power_warning = ""
+        self._static_device = None
+        self._static_location = None
+        self._static_last_reasserted_at = None
+        self._static_last_reasserted_monotonic = None
+        self._static_reassertion_count = 0
+
+    @staticmethod
+    def _terminate_process(
+        process: Optional[subprocess.Popen[str]], *, timeout: float = 5
+    ) -> None:
+        if process is None or process.poll() is not None:
             return
         process.terminate()
         try:
-            process.wait(timeout=5)
+            process.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
             process.kill()
-            process.wait(timeout=5)
-        self._static_process = None
-        self._static_device = None
-        self._static_location = None
+            process.wait(timeout=timeout)
 
     def _reap_locked(self) -> None:
         if self._active is None:
@@ -525,7 +716,20 @@ class PlaybackManager:
                     "message": message,
                     "detail": raw_error,
                 }
+            self._stop_power_assertion(self._active)
             self._active = None
+
+    @staticmethod
+    def _stop_power_assertion(active: ActivePlayback) -> None:
+        process = active.power_process
+        if process is None or process.poll() is not None:
+            return
+        process.terminate()
+        try:
+            process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=2)
 
     @staticmethod
     def _process_stderr(process: subprocess.Popen[str]) -> str:
@@ -550,7 +754,14 @@ class PlaybackManager:
             paused_seconds += now - self._active.paused_at
         elapsed = max(0.0, now - self._active.started_at - paused_seconds)
         progress = min(1.0, elapsed / self._active.duration_seconds)
-        return {
+        power_process = self._active.power_process
+        preventing_idle_sleep = (
+            power_process is not None and power_process.poll() is None
+        )
+        power_warning = self._active.power_warning
+        if power_process is not None and not preventing_idle_sleep and not power_warning:
+            power_warning = "Mac idle-sleep prevention ended before playback"
+        status = {
             "state": "paused" if self._active.paused_at is not None else "playing",
             "routeId": self._active.route_id,
             "label": self._active.label,
@@ -561,7 +772,11 @@ class PlaybackManager:
             "pid": self._active.process.pid,
             "deviceId": self._active.device_id,
             "deviceClass": self._active.device_class,
+            "preventingIdleSleep": preventing_idle_sleep,
         }
+        if power_warning:
+            status["powerWarning"] = power_warning
+        return status
 
 
 class ApiError(Exception):
@@ -587,6 +802,8 @@ class RouteRequestHandler(BaseHTTPRequestHandler):
     generated_directory = GENERATED_DIR
     timing_provider: Optional[RoadTimingProvider] = DEFAULT_TIMING_PROVIDER
     directions_provider: Optional[DirectionsProvider] = DEFAULT_DIRECTIONS_PROVIDER
+    itinerary_planner: Optional[ItineraryPlanner] = DEFAULT_ITINERARY_PLANNER
+    geocoder: Optional[PlaceGeocoder] = DEFAULT_GEOCODER
     google_maps_link_expander: Optional[GoogleMapsLinkExpander] = None
 
     def do_HEAD(self) -> None:
@@ -610,11 +827,22 @@ class RouteRequestHandler(BaseHTTPRequestHandler):
             if parsed.path == "/api/status":
                 self._send_json(
                     {
-                        "apiVersion": 3,
+                        "apiVersion": 4,
                         "capabilities": BACKEND_CAPABILITIES,
                         "device": self.manager.device_status(),
                         "playback": self.manager.status(),
                         "simulatedLocation": self.manager.simulated_location(),
+                        "llm": {
+                            "configured": self.itinerary_planner is not None,
+                            "provider": "OpenAI",
+                            "model": (
+                                self.itinerary_planner.model
+                                if self.itinerary_planner is not None
+                                else os.environ.get(
+                                    "ROUTE_CONTROLLER_LLM_MODEL", "gpt-5.4-mini"
+                                )
+                            ),
+                        },
                     }
                 )
                 return
@@ -685,6 +913,22 @@ class RouteRequestHandler(BaseHTTPRequestHandler):
                     imports_directory=self.imports_directory,
                     directions_provider=self.directions_provider,
                     link_expander=self.google_maps_link_expander,
+                )
+                self._send_json(generated, status=HTTPStatus.CREATED)
+                return
+            if parsed.path == "/api/itineraries/interpret":
+                interpreted = interpret_itinerary_request(
+                    self._read_json_body(),
+                    planner=self.itinerary_planner,
+                    geocoder=self.geocoder,
+                )
+                self._send_json(interpreted)
+                return
+            if parsed.path == "/api/routes/from-itinerary":
+                generated = generate_itinerary_gpx(
+                    self._read_json_body(),
+                    imports_directory=self.imports_directory,
+                    directions_provider=self.directions_provider,
                 )
                 self._send_json(generated, status=HTTPStatus.CREATED)
                 return
@@ -1061,6 +1305,178 @@ def import_gpx_payload(
         summary,
         original_filename=original_filename,
     )
+
+
+def interpret_itinerary_request(
+    payload: Any,
+    *,
+    planner: Optional[ItineraryPlanner],
+    geocoder: Optional[PlaceGeocoder],
+) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise ApiError(
+            HTTPStatus.BAD_REQUEST,
+            "Request body must be a JSON object",
+            code="invalid_itinerary_request",
+        )
+    if planner is None:
+        raise ApiError(
+            HTTPStatus.SERVICE_UNAVAILABLE,
+            "Itinerary planning is not configured. Set OPENAI_API_KEY and restart the controller.",
+            code="llm_not_configured",
+        )
+    if geocoder is None:
+        raise ApiError(
+            HTTPStatus.SERVICE_UNAVAILABLE,
+            "No place geocoder is configured",
+            code="geocoder_not_configured",
+        )
+    try:
+        description, day, timezone_name = validate_planner_request(
+            payload.get("description"),
+            payload.get("date"),
+            payload.get("timezone"),
+        )
+        itinerary = planner.interpret(
+            description,
+            day=day,
+            timezone_name=timezone_name,
+        )
+        resolved = tuple(geocoder.geocode(place) for place in itinerary.places)
+    except ItineraryValidationError as error:
+        raise ApiError(
+            HTTPStatus.BAD_REQUEST,
+            str(error),
+            code="invalid_itinerary_request",
+        ) from error
+    except ItineraryProviderError as error:
+        raise ApiError(
+            HTTPStatus.BAD_GATEWAY,
+            str(error),
+            code="itinerary_provider_failed",
+        ) from error
+    except GeocodingError as error:
+        raise ApiError(
+            HTTPStatus.UNPROCESSABLE_ENTITY,
+            str(error),
+            code="place_not_resolved",
+        ) from error
+    return {
+        "itinerary": itinerary_payload(itinerary),
+        "resolvedPlaces": [resolved_place_payload(place) for place in resolved],
+        "interpretation": {
+            "provider": "OpenAI",
+            "model": planner.model,
+            "geocoder": geocoder.name,
+            "requiresConfirmation": True,
+        },
+    }
+
+
+def generate_itinerary_gpx(
+    payload: Any,
+    *,
+    imports_directory: Path = IMPORTS_DIR,
+    directions_provider: Optional[DirectionsProvider] = DEFAULT_DIRECTIONS_PROVIDER,
+) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise ApiError(
+            HTTPStatus.BAD_REQUEST,
+            "Request body must be a JSON object",
+            code="invalid_itinerary_request",
+        )
+    if payload.get("confirmed") is not True:
+        raise ApiError(
+            HTTPStatus.BAD_REQUEST,
+            "Review and confirm every resolved place before building the GPX",
+            code="itinerary_confirmation_required",
+        )
+    if directions_provider is None:
+        raise ApiError(
+            HTTPStatus.SERVICE_UNAVAILABLE,
+            "No directions provider is configured",
+            code="directions_unavailable",
+        )
+    try:
+        itinerary = parse_itinerary(payload.get("itinerary"))
+        resolved = parse_resolved_places(payload.get("resolvedPlaces"), itinerary)
+        composed = compose_itinerary(
+            itinerary,
+            resolved,
+            directions_provider=directions_provider,
+        )
+        content = track_xml(itinerary.name, composed.points)
+    except ItineraryValidationError as error:
+        raise ApiError(
+            HTTPStatus.BAD_REQUEST,
+            str(error),
+            code="invalid_itinerary_request",
+        ) from error
+    except ItineraryProviderError as error:
+        raise ApiError(
+            HTTPStatus.BAD_GATEWAY,
+            str(error),
+            code="directions_unavailable",
+        ) from error
+    except GpxValidationError as error:
+        raise ApiError(
+            HTTPStatus.BAD_GATEWAY,
+            "The itinerary could not be converted to GPX",
+            detail=str(error),
+            code="itinerary_invalid_gpx",
+        ) from error
+    if len(content.encode("utf-8")) > MAX_GPX_CONTENT_BYTES:
+        raise ApiError(
+            HTTPStatus.BAD_GATEWAY,
+            "The generated itinerary is too large to store safely",
+            code="itinerary_route_too_large",
+        )
+
+    imports_directory.mkdir(parents=True, exist_ok=True)
+    stored_path = _write_unique_import(
+        imports_directory,
+        _safe_import_filename(f"{itinerary.name}.gpx"),
+        content,
+    )
+    first_place = next(
+        place for place in resolved if place.id == _itinerary_location_id(itinerary.segments[0], True)
+    )
+    last_place = next(
+        place for place in resolved if place.id == _itinerary_location_id(itinerary.segments[-1], False)
+    )
+    metadata = {
+        "sourceType": "llm-itinerary",
+        "provider": ", ".join(composed.directions_providers) or "stationary",
+        "distanceMeters": composed.distance_meters,
+        "estimatedDurationSeconds": (
+            composed.points[-1].time - composed.points[0].time
+        ).total_seconds(),
+        "travelSeconds": composed.travel_seconds,
+        "originLabel": first_place.label,
+        "destinationLabel": last_place.label,
+        "originalFilename": stored_path.name,
+        "itinerary": itinerary_payload(itinerary),
+        "resolvedPlaces": [resolved_place_payload(place) for place in resolved],
+    }
+    try:
+        _write_import_metadata(stored_path, metadata)
+    except ApiError:
+        stored_path.unlink(missing_ok=True)
+        raise
+    summary = inspect_gpx_content(content, fallback_name=itinerary.name)
+    response = _imported_gpx_payload(
+        stored_path,
+        summary,
+        original_filename=stored_path.name,
+    )
+    response["previewPoints"] = _preview_points_payload(list(composed.points))
+    return response
+
+
+def _itinerary_location_id(segment: Any, at_start: bool) -> str:
+    if segment.kind == "stay":
+        return segment.place_id
+    return segment.origin_id if at_start else segment.destination_id
 
 
 def generate_directions_gpx(
@@ -1531,11 +1947,15 @@ def prepare_imported_gpx(
     )
 
     try:
+        source_metadata = _read_import_metadata(source_path)
+        preserve_sparse_itinerary = (
+            source_metadata.get("sourceType") == "llm-itinerary"
+        )
         prepared = prepare_gpx_playback_result(
             content,
             fallback_name=source_path.stem,
             duration_seconds=duration_seconds,
-            interpolate_seconds=0.5,
+            interpolate_seconds=None if preserve_sparse_itinerary else 0.5,
             start_time=datetime.now(timezone.utc).replace(microsecond=0),
             timing_mode=timing_mode,
             timing_provider=timing_provider,
@@ -1760,14 +2180,17 @@ _IMPORT_METADATA_FIELDS = {
     "distanceMeters",
     "destinationLabel",
     "estimatedDurationSeconds",
+    "itinerary",
     "originalFilename",
     "originLabel",
     "provider",
+    "resolvedPlaces",
     "requestedDestination",
     "requestedOrigin",
     "sourceType",
     "sourceUrlHost",
     "sourceWasShortened",
+    "travelSeconds",
 }
 
 

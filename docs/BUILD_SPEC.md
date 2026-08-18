@@ -452,11 +452,14 @@ POST /api/location/clear
 
 `POST /api/location/set` accepts numeric `latitude` and `longitude` fields,
 rejects out-of-range coordinates and active route playback, then activates the
-static coordinate on the connected iPhone. The controller retains that static
-position in its runtime status until route playback begins or location is
-cleared. The Coordinates panel can also enter a one-click Cesium selection
-mode. The selected point remains a frontend draft and map marker until the user
-explicitly presses **Activate**.
+static coordinate on the connected iPhone or iPad. The controller retains that
+coordinate as desired state until route playback begins or location is cleared.
+A watchdog reasserts it every five minutes, retries when the device command
+exits, and holds an idle-sleep assertion on macOS. `GET /api/status` reports the
+heartbeat interval, last successful reassertion, retry state, reassertion count,
+and sleep-prevention state. The Coordinates panel can also enter a one-click
+Cesium selection mode. The selected point remains a frontend draft and map
+marker until the user explicitly presses **Activate**.
 
 ### Route creation
 
@@ -856,12 +859,12 @@ Exit criterion: A user can create, preview, save, and play a new route.
 
 ### Phase 4 — LLM route assistant
 
-1. Define a strict structured request schema.
-2. Add natural-language input.
-3. Resolve named locations.
-4. Call the routing provider.
-5. Require preview confirmation.
-6. Add privacy settings.
+1. Define a strict structured request schema. **Implemented**
+2. Add natural-language input. **Implemented**
+3. Resolve named locations. **Implemented**
+4. Call the routing provider. **Implemented**
+5. Require preview confirmation. **Implemented**
+6. Add privacy settings and provider overrides. **Implemented for local MVP**
 
 Exit criterion: Natural-language requests reliably become confirmed, road-following routes.
 

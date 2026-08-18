@@ -2,6 +2,7 @@ import http.client
 import json
 import signal
 import subprocess
+import time
 from io import StringIO
 from http.server import ThreadingHTTPServer
 from pathlib import Path
@@ -354,6 +355,13 @@ def test_playback_manager_owns_one_process(monkeypatch) -> None:
     ]
     assert "--userspace" in processes[0].arguments
     assert processes[0].arguments[6:8] == ["--udid", IPAD.identifier]
+    assert processes[1].arguments == [
+        "caffeinate",
+        "-i",
+        "-w",
+        str(processes[0].pid),
+    ]
+    assert status["preventingIdleSleep"] is True
 
     with pytest.raises(ApiError, match="already playing"):
         manager.start("l2-to-l1")
@@ -371,6 +379,7 @@ def test_playback_manager_owns_one_process(monkeypatch) -> None:
     stopped = manager.stop(clear_location=True)
     assert stopped["state"] == "idle"
     assert processes[0].terminated is True
+    assert processes[1].terminated is True
 
 
 def test_playback_manager_sets_and_clears_static_location(monkeypatch) -> None:
@@ -395,19 +404,22 @@ def test_playback_manager_sets_and_clears_static_location(monkeypatch) -> None:
             arguments, 0, "", ""
         ),
     )
-    manager = PlaybackManager(userspace=True, device_provider=ipad_provider)
+    manager = PlaybackManager(
+        userspace=True,
+        device_provider=ipad_provider,
+        process_startup_grace_seconds=0,
+    )
 
     activated = manager.set_location(37.3835546, -122.1371287)
 
-    assert activated == {
-        "state": "active",
-        "latitude": 37.3835546,
-        "longitude": -122.1371287,
-    }
-    assert manager.simulated_location() == {
-        "latitude": 37.3835546,
-        "longitude": -122.1371287,
-    }
+    assert activated["state"] == "active"
+    assert activated["latitude"] == 37.3835546
+    assert activated["longitude"] == -122.1371287
+    assert activated["heartbeatIntervalSeconds"] == 300
+    assert activated["reassertionCount"] == 1
+    assert activated["lastReassertedAt"].endswith("Z")
+    assert activated["preventingIdleSleep"] is True
+    assert manager.simulated_location() == activated
     assert processes[0].arguments == [
         "pymobiledevice3",
         "developer",
@@ -421,10 +433,112 @@ def test_playback_manager_sets_and_clears_static_location(monkeypatch) -> None:
         "37.3835546",
         "-122.1371287",
     ]
+    assert processes[1].arguments[:3] == ["caffeinate", "-i", "-w"]
 
     assert manager.clear_location() == {"state": "cleared"}
     assert processes[0].terminated is True
+    assert processes[1].terminated is True
     assert manager.simulated_location() is None
+
+
+def test_static_location_watchdog_periodically_reasserts_coordinate(
+    monkeypatch,
+) -> None:
+    processes = []
+
+    def fake_popen(arguments, **kwargs):
+        process = FakeProcess(arguments, **kwargs)
+        processes.append(process)
+        return process
+
+    monkeypatch.setattr(
+        "route_controller.server.resolve_executable",
+        lambda _: "pymobiledevice3",
+    )
+    monkeypatch.setattr("route_controller.server.subprocess.Popen", fake_popen)
+    monkeypatch.setattr(
+        "route_controller.server.subprocess.run",
+        lambda arguments, **kwargs: subprocess.CompletedProcess(
+            arguments, 0, "", ""
+        ),
+    )
+    manager = PlaybackManager(
+        userspace=True,
+        device_provider=ipad_provider,
+        static_heartbeat_interval_seconds=0.04,
+        static_watchdog_poll_seconds=0.01,
+        process_startup_grace_seconds=0,
+    )
+
+    manager.set_location(37.3835546, -122.1371287)
+    deadline = time.monotonic() + 1
+    while len(processes) < 3 and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+    status = manager.simulated_location()
+    assert len(processes) >= 3
+    assert processes[0].terminated is True
+    assert processes[2].arguments == processes[0].arguments
+    assert status is not None
+    assert status["state"] == "active"
+    assert status["reassertionCount"] >= 2
+
+    manager.clear_location()
+    process_count = len(processes)
+    time.sleep(0.08)
+    assert len(processes) == process_count
+
+
+def test_static_location_watchdog_recovers_after_device_command_exits(
+    monkeypatch,
+) -> None:
+    processes = []
+
+    def fake_popen(arguments, **kwargs):
+        process = FakeProcess(arguments, **kwargs)
+        processes.append(process)
+        return process
+
+    monkeypatch.setattr(
+        "route_controller.server.resolve_executable",
+        lambda _: "pymobiledevice3",
+    )
+    monkeypatch.setattr("route_controller.server.subprocess.Popen", fake_popen)
+    monkeypatch.setattr(
+        "route_controller.server.subprocess.run",
+        lambda arguments, **kwargs: subprocess.CompletedProcess(
+            arguments, 0, "", ""
+        ),
+    )
+    manager = PlaybackManager(
+        userspace=True,
+        device_provider=ipad_provider,
+        static_heartbeat_interval_seconds=60,
+        static_watchdog_poll_seconds=0.01,
+        process_startup_grace_seconds=0,
+    )
+
+    manager.set_location(37.3835546, -122.1371287)
+    processes[0].stderr = StringIO("developer tunnel disconnected")
+    processes[0].returncode = 1
+
+    recovering = manager.simulated_location()
+    assert recovering is not None
+    assert recovering["state"] == "recovering"
+    assert recovering["latitude"] == 37.3835546
+
+    deadline = time.monotonic() + 1
+    while len(processes) < 3 and time.monotonic() < deadline:
+        time.sleep(0.01)
+    recovered = manager.simulated_location()
+
+    assert len(processes) >= 3
+    assert processes[2].arguments == processes[0].arguments
+    assert recovered is not None
+    assert recovered["state"] == "active"
+    assert recovered["reassertionCount"] == 2
+    assert manager.status() == {"state": "idle"}
+    manager.clear_location()
 
 
 def test_static_location_coordinates_require_valid_numbers() -> None:
@@ -479,6 +593,7 @@ def test_static_location_endpoint_sets_reports_and_clears(
         userspace=True,
         registry=StaticLocationHandler.registry,
         device_provider=ipad_provider,
+        process_startup_grace_seconds=0,
     )
     server = ThreadingHTTPServer(("127.0.0.1", 0), StaticLocationHandler)
     thread = Thread(target=server.serve_forever, daemon=True)
@@ -525,11 +640,13 @@ def test_static_location_endpoint_sets_reports_and_clears(
     assert set_response.status == 200
     assert set_payload["state"] == "active"
     assert status_response.status == 200
-    assert status_payload["simulatedLocation"] == {
-        "latitude": 37.3835546,
-        "longitude": -122.1371287,
-    }
+    assert status_payload["simulatedLocation"]["latitude"] == 37.3835546
+    assert status_payload["simulatedLocation"]["longitude"] == -122.1371287
+    assert status_payload["simulatedLocation"]["state"] == "active"
+    assert status_payload["simulatedLocation"]["heartbeatIntervalSeconds"] == 300
+    assert status_payload["simulatedLocation"]["preventingIdleSleep"] is True
     assert status_payload["capabilities"]["staticLocation"] is True
+    assert status_payload["capabilities"]["staticLocationHeartbeat"] is True
     assert invalid_response.status == 400
     assert invalid_payload["errorCode"] == "invalid_static_location"
     assert clear_response.status == 200
@@ -542,6 +659,8 @@ def test_static_location_endpoint_sets_reports_and_clears(
         "--",
     ]
     assert processes[0].terminated is True
+    assert processes[1].arguments[:3] == ["caffeinate", "-i", "-w"]
+    assert processes[1].terminated is True
     assert commands[-1][4:] == [
         "clear",
         "--userspace",

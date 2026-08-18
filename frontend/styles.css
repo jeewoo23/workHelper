@@ -557,6 +557,113 @@ h1, h2, p { margin-top: 0; }
   padding-top: 6px;
   border-top: 1px solid var(--border-soft);
 }
+.itinerary-planner {
+  display: grid;
+  gap: 7px;
+}
+.itinerary-description,
+.itinerary-context label {
+  display: grid;
+  gap: 4px;
+  padding: 7px;
+  background: var(--panel-deep);
+  border: 1px solid var(--border-soft);
+  border-radius: 5px;
+}
+.itinerary-description > span,
+.itinerary-context span {
+  color: #75b9dc;
+  font-size: 7px;
+  letter-spacing: .14em;
+}
+.itinerary-description textarea,
+.itinerary-context input {
+  width: 100%;
+  min-width: 0;
+  padding: 0;
+  color: #d1dce5;
+  background: transparent;
+  border: 0;
+  font: 400 8px "IBM Plex Mono", monospace;
+}
+.itinerary-description textarea {
+  min-height: 76px;
+  line-height: 1.5;
+  resize: vertical;
+}
+.itinerary-description textarea:focus,
+.itinerary-context input:focus { color: white; outline: 0; }
+.itinerary-context {
+  display: grid;
+  grid-template-columns: 1fr 1.35fr;
+  gap: 5px;
+}
+.itinerary-interpret,
+.itinerary-build {
+  width: 100%;
+  min-height: 31px;
+  color: #9dd8f4;
+  background: rgba(67, 162, 216, .07);
+  border-color: rgba(67, 162, 216, .42);
+}
+.itinerary-build:not(:disabled) {
+  color: #bde6c8;
+  border-color: rgba(97, 190, 125, .52);
+}
+.itinerary-review {
+  display: grid;
+  gap: 5px;
+}
+.itinerary-review[hidden] { display: none; }
+.itinerary-review-heading,
+.itinerary-assumptions {
+  display: grid;
+  gap: 3px;
+  padding: 7px;
+  background: rgba(67, 162, 216, .045);
+  border: 1px solid var(--border-soft);
+  border-radius: 5px;
+}
+.itinerary-review-heading strong { color: #c7d5df; font-size: 9px; }
+.itinerary-review-heading span,
+.itinerary-assumptions span { color: var(--dim); font-size: 7px; line-height: 1.4; }
+.itinerary-timeline {
+  display: grid;
+  gap: 1px;
+  padding: 5px 7px;
+  background: rgba(9, 15, 19, .5);
+  border: 1px solid var(--border-soft);
+  border-radius: 5px;
+}
+.itinerary-timeline div {
+  display: grid;
+  grid-template-columns: 66px minmax(0, 1fr);
+  gap: 5px;
+  padding: 3px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, .035);
+}
+.itinerary-timeline div:last-child { border-bottom: 0; }
+.itinerary-timeline code { color: #78bada; font: 400 7px "IBM Plex Mono", monospace; }
+.itinerary-timeline span { color: #aebdc8; font-size: 7px; }
+.itinerary-place {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 7px;
+  align-items: start;
+  padding: 7px;
+  background: rgba(9, 15, 19, .5);
+  border: 1px solid var(--border-soft);
+  border-radius: 5px;
+}
+.itinerary-place:has(input:checked) {
+  border-color: rgba(97, 190, 125, .42);
+  box-shadow: inset 2px 0 0 rgba(97, 190, 125, .65);
+}
+.itinerary-place > span { display: grid; gap: 3px; min-width: 0; }
+.itinerary-place strong { color: #b9c8d2; font-size: 8px; }
+.itinerary-place small { color: var(--dim); font-size: 7px; line-height: 1.35; }
+.itinerary-place code { color: #78bada; font: 400 7px "IBM Plex Mono", monospace; }
+.itinerary-assumptions strong { color: #c4a969; font-size: 7px; letter-spacing: .12em; }
 .route-card[hidden] { display: none; }
 .route-card {
   position: relative;

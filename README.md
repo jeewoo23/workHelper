@@ -16,6 +16,8 @@ The project contains the complete Phase 3 route-building workflow from
   different relative speeds.
 - Build road-following routes from coordinates or coordinate-based Google Maps
   directions links.
+- Turn an hour-by-hour natural-language itinerary into a reviewed, sparse,
+  timed GPX route without asking the model to invent coordinates or geometry.
 
 The CLI does not modify a connected device unless `--execute` is explicitly
 provided.
@@ -146,8 +148,11 @@ The backend generates a single fixed-cadence half-second `pymobiledevice3`
 track under `routes/generated/` and registers it as a custom route. Dense or
 duplicate source timestamps are resampled into strictly increasing playback
 timestamps while retaining the exact route endpoints and relative speed
-profile. Only successfully prepared imports become eligible for **Start on
-device**. Preparing the same import again rebuilds its track and timing profile.
+profile. AI itinerary GPX files are the exception: their existing sparse source
+timing is preserved so a location can remain fixed for hours without producing
+hundreds of thousands of duplicate points. Only successfully prepared imports
+become eligible for **Start on device**. Preparing the same import again rebuilds
+its track and timing profile.
 
 ## Build a route from coordinates
 
@@ -186,8 +191,16 @@ static location to the selected iPhone or iPad through `pymobiledevice3`.
 
 Static activation is disabled while a route is playing. Starting a route
 replaces the static position, and **Clear Location** restores real GPS. The
-active static coordinate is reported by the backend and remains visible after
-a frontend refresh while the same controller process is running.
+controller treats the active coordinate as desired state: it reasserts the
+same location every five minutes, automatically retries if the device command
+or developer tunnel drops, and uses a macOS `caffeinate` assertion to prevent
+idle system sleep for the life of the static session. The Coordinates panel
+reports whether the session is active or reconnecting and shows the last
+successful reassertion time.
+
+Keep the controller running and the iPad connected for an overnight session.
+Closing the MacBook lid can still suspend a Mac unless it is in a supported
+clamshell setup; the idle-sleep assertion is not a substitute for lid-open power.
 
 ## Build a route from a Google Maps link
 
@@ -206,13 +219,63 @@ OSRM, saves the timed source GPX, and opens the preview. Review the route under
 
 Phase 3 intentionally does not geocode place names or addresses. A link such as
 “Stanford to Berkeley” produces an actionable message asking for a
-coordinate-based link or manual endpoints; natural-language and named-place
-resolution belong to Phase 4. Central Blue does not scrape Google route
-geometry, and pasting a link never starts device simulation.
+coordinate-based link or manual endpoints. Named-place resolution is now
+available through the separate Phase 4 **Plan From Description** workflow; it
+does not change how Google Maps links are parsed. Central Blue does not scrape
+Google route geometry, and pasting a link never starts device simulation.
 
 Generated-route metadata is stored locally beside its GPX source, including
 the provider, ETA, distance, requested endpoints, and source kind. Those
 details remain available after refresh and are removed with the route.
+
+## Plan a full day from a description
+
+Copy the environment template, add an OpenAI API key, and restart the local
+controller:
+
+```bash
+cp .env.example .env
+# Open .env in your editor and set OPENAI_API_KEY, then:
+./scripts/run_frontend.sh
+```
+
+The `.env` file is ignored by Git and is loaded only by the local startup
+script. The browser never receives the key. The default model is
+`gpt-5.4-mini`; change `ROUTE_CONTROLLER_LLM_MODEL` in `.env` if needed.
+
+Open **Plan From Description**, choose the date and timezone, and describe the
+day hour by hour. The workflow deliberately has two steps:
+
+1. OpenAI converts the text to a strict schedule containing only stationary
+   stays and driving travel windows.
+2. Nominatim resolves the named places. You must check every displayed address
+   and coordinate before **Confirm Places & Build GPX** becomes available.
+
+After confirmation, OSRM supplies road geometry for travel windows. Stationary
+windows use the arrival coordinate plus one same-coordinate heartbeat per hour
+and a departure coordinate. This keeps an all-day file small while leaving the
+device at the last coordinate between updates. A hard 12,000-point limit and a
+24-hour schedule limit prevent unexpectedly large routes.
+
+The generated route appears under **Import GPX**. Select **Prepare** with
+**Use Best Available Travel Time** enabled to preserve the described schedule,
+then start it on the connected device. During playback the controller starts a
+macOS `caffeinate` assertion tied to the playback process so idle sleep does not
+interrupt a long itinerary. Closing the controller, stopping playback,
+disconnecting the device, or a device command failure still ends playback and
+is reported in the UI.
+
+The date and local times define the relative timeline and timezone interpretation;
+they do not schedule an unattended future start. Playback begins when you press
+**Start on device**, with the same segment durations and stationary gaps.
+
+Privacy: the description and place labels are sent to OpenAI, place queries are
+sent to the configured Nominatim server, and confirmed coordinates are sent to
+the configured OSRM server. Precise coordinates are not sent to the language
+model. Nominatim results are cached locally in `routes/imports/` and its public
+service is rate-limited to one request per second. Self-hosted compatible
+geocoding and routing endpoints can be selected with
+`ROUTE_CONTROLLER_GEOCODER_URL` and `ROUTE_CONTROLLER_OSRM_URL`.
 
 See [Phase 3 acceptance](docs/PHASE_3_ACCEPTANCE.md) for the automated checks
 and the final tethered-device verification.
