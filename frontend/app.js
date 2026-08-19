@@ -22,7 +22,7 @@ const state = {
     deviceReport: null,
     routes: [],
     playback: { state: "idle" },
-    llm: null,
+    schedule: null,
     selectingDevice: false,
     error: "",
     mode: "preview"
@@ -53,11 +53,24 @@ const state = {
     pickTarget: null,
     lastMetadata: null
   },
-  itineraryPlanner: {
+  locationSchedule: {
     status: "idle",
     error: "",
-    review: null,
-    confirmedPlaceIds: new Set()
+    saving: false,
+    dirty: false,
+    loadedSignature: "",
+    name: "Weekly location schedule",
+    timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || "America/Los_Angeles",
+    entries: [
+      {
+        label: "Location 1",
+        days: ["mon", "tue", "wed", "thu", "fri"],
+        start: "09:00",
+        end: "17:00",
+        latitude: "",
+        longitude: ""
+      }
+    ]
   },
   trackSimulatedLocation: false,
   mapRouteGeometry: {
@@ -84,10 +97,6 @@ const fmt = new Intl.NumberFormat("en-US", {
   maximumFractionDigits: 7
 });
 const pad = number => String(number).padStart(2, "0");
-const localDateInputValue = () => {
-  const now = new Date();
-  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
-};
 const browserTimezone = () => Intl.DateTimeFormat().resolvedOptions().timeZone
   || "America/Los_Angeles";
 const durationText = seconds => `${pad(Math.floor(seconds / 60))}:${pad(Math.floor(seconds % 60))}`;
@@ -720,25 +729,24 @@ function renderShell() {
                   </div>
                 </details>
 
-                <details class="sidebar-section" data-sidebar-section="itinerary-planner">
-                  <summary><span>PLAN FROM DESCRIPTION</span><b>AI + GPX</b></summary>
-                  <div class="sidebar-section-body itinerary-planner">
-                    <label class="itinerary-description">
-                      <span>DESCRIBE YOUR DAY HOUR BY HOUR</span>
-                      <textarea data-itinerary-input="description" maxlength="10000" rows="6" placeholder="Start at home at 7 AM, drive to the office at 8, stay until 5 PM, then drive home…"></textarea>
-                    </label>
-                    <div class="itinerary-context">
-                      <label><span>DATE</span><input data-itinerary-input="date" type="date" value="${localDateInputValue()}"></label>
-                      <label><span>TIMEZONE</span><input data-itinerary-input="timezone" type="text" maxlength="80" value="${browserTimezone()}"></label>
+                <details class="sidebar-section" data-sidebar-section="location-schedule">
+                  <summary><span>LOCATION SCHEDULE</span><b>WEEKLY</b></summary>
+                  <div class="sidebar-section-body schedule-editor">
+                    <div class="schedule-context">
+                      <label><span>NAME</span><input data-schedule-input="name" type="text" maxlength="120" value="Weekly location schedule"></label>
+                      <label><span>TIMEZONE</span><input data-schedule-input="timezone" type="text" maxlength="80" value="${browserTimezone()}"></label>
                     </div>
-                    <button class="secondary itinerary-interpret" type="button" data-action="interpret-itinerary">INTERPRET SCHEDULE</button>
-                    <div class="builder-feedback" data-live-card="itinerary" aria-live="polite">
-                      <strong data-live="itinerary-status">Describe a day to build a timed route</strong>
-                      <span data-live="itinerary-detail">The AI structures the schedule; coordinates and GPX are handled deterministically.</span>
+                    <div class="schedule-entries" data-schedule-entries></div>
+                    <button class="secondary schedule-add" type="button" data-action="add-schedule-window">+ ADD LOCATION WINDOW</button>
+                    <div class="builder-feedback" data-live-card="schedule" aria-live="polite">
+                      <strong data-live="schedule-status">Build a weekly location schedule</strong>
+                      <span data-live="schedule-detail">Each window switches directly to its coordinate at the selected local time.</span>
                     </div>
-                    <div class="itinerary-review" data-itinerary-review hidden></div>
-                    <button class="secondary itinerary-build" type="button" data-action="build-itinerary" hidden>CONFIRM PLACES &amp; BUILD GPX</button>
-                    <em class="builder-privacy">Your description is sent to OpenAI. Place searches are sent to the configured geocoder. Review every match before GPX generation.</em>
+                    <div class="schedule-actions">
+                      <button class="secondary schedule-activate" type="button" data-action="activate-schedule">SAVE &amp; ACTIVATE</button>
+                      <button class="secondary schedule-stop" type="button" data-action="stop-schedule" disabled>STOP SCHEDULE</button>
+                    </div>
+                    <em class="builder-privacy">Schedules are stored only on this Mac. Windows repeat every selected weekday; an end time earlier than its start continues overnight.</em>
                   </div>
                 </details>
 
@@ -948,14 +956,37 @@ function bindControls() {
     "click",
     generateGoogleMapsPreview
   );
-  document.querySelector('[data-action="interpret-itinerary"]').addEventListener(
+  document.querySelector('[data-action="add-schedule-window"]').addEventListener(
     "click",
-    interpretItinerary
+    addScheduleWindow
   );
-  document.querySelector('[data-action="build-itinerary"]').addEventListener(
+  document.querySelector('[data-action="activate-schedule"]').addEventListener(
     "click",
-    buildConfirmedItinerary
+    activateLocationSchedule
   );
+  document.querySelector('[data-action="stop-schedule"]').addEventListener(
+    "click",
+    stopLocationSchedule
+  );
+  document.querySelectorAll("[data-schedule-input]").forEach(input => {
+    input.addEventListener("input", () => {
+      state.locationSchedule[input.dataset.scheduleInput] = input.value;
+      state.locationSchedule.dirty = true;
+    });
+  });
+  document.querySelector("[data-schedule-entries]").addEventListener(
+    "input",
+    updateScheduleDraftFromEvent
+  );
+  document.querySelector("[data-schedule-entries]").addEventListener(
+    "change",
+    updateScheduleDraftFromEvent
+  );
+  document.querySelector("[data-schedule-entries]").addEventListener("click", event => {
+    const button = event.target.closest("[data-remove-schedule-window]");
+    if (button) removeScheduleWindow(Number(button.dataset.removeScheduleWindow));
+  });
+  renderScheduleEntries();
   document.querySelector("[data-imported-route-list]").addEventListener("click", event => {
     const deleteButton = event.target.closest("[data-delete-import]");
     if (deleteButton) {
@@ -1426,187 +1457,247 @@ function updateRouteBuilderPanel() {
   }
 }
 
-async function interpretItinerary() {
-  const description = document.querySelector(
-    '[data-itinerary-input="description"]'
-  )?.value.trim() || "";
-  const date = document.querySelector('[data-itinerary-input="date"]')?.value || "";
-  const timezone = document.querySelector(
-    '[data-itinerary-input="timezone"]'
-  )?.value.trim() || "";
-  if (!description) {
-    state.itineraryPlanner.status = "error";
-    state.itineraryPlanner.error = "Describe where you will be and when you travel.";
-    updateItineraryPanel();
-    return;
-  }
-  if (!state.backend.available || !supportsBackendCapability("itineraryPlanning")) {
-    state.itineraryPlanner.status = "error";
-    state.itineraryPlanner.error = "Start or restart the local controller to enable itinerary planning.";
-    updateItineraryPanel();
-    return;
-  }
-  if (!state.backend.llm?.configured) {
-    state.itineraryPlanner.status = "error";
-    state.itineraryPlanner.error = "Set OPENAI_API_KEY in the terminal, then restart the controller.";
-    updateItineraryPanel();
-    return;
-  }
+const scheduleDayLabels = [
+  ["mon", "M"], ["tue", "T"], ["wed", "W"], ["thu", "T"],
+  ["fri", "F"], ["sat", "S"], ["sun", "S"]
+];
 
-  state.itineraryPlanner.status = "interpreting";
-  state.itineraryPlanner.error = "";
-  state.itineraryPlanner.review = null;
-  state.itineraryPlanner.confirmedPlaceIds = new Set();
-  updateItineraryPanel();
-  try {
-    state.itineraryPlanner.review = await apiRequest(
-      "/api/itineraries/interpret",
-      {
-        method: "POST",
-        body: JSON.stringify({ description, date, timezone })
+function renderScheduleEntries() {
+  const container = document.querySelector("[data-schedule-entries]");
+  if (!container) return;
+  const entries = state.locationSchedule.entries;
+  container.innerHTML = entries.map((entry, index) => `
+    <section class="schedule-window" data-schedule-window="${index}">
+      <div class="schedule-window-heading">
+        <strong>WINDOW ${index + 1}</strong>
+        <button type="button" data-remove-schedule-window="${index}"${entries.length === 1 ? " disabled" : ""}>REMOVE</button>
+      </div>
+      <label class="schedule-label"><span>LOCATION NAME</span><input data-schedule-index="${index}" data-schedule-field="label" maxlength="100" value="${escapeHtml(entry.label)}"></label>
+      <div class="schedule-days" aria-label="Repeat days">
+        ${scheduleDayLabels.map(([day, label]) => `<label title="${day}"><input type="checkbox" data-schedule-index="${index}" data-schedule-day="${day}"${entry.days.includes(day) ? " checked" : ""}><span>${label}</span></label>`).join("")}
+      </div>
+      <div class="schedule-time-grid">
+        <label><span>START</span><input type="time" data-schedule-index="${index}" data-schedule-field="start" value="${escapeHtml(entry.start)}"></label>
+        <label><span>END</span><input type="time" data-schedule-index="${index}" data-schedule-field="end" value="${escapeHtml(entry.end)}"></label>
+      </div>
+      <div class="schedule-coordinate-grid">
+        <label><span>LATITUDE</span><input class="mono" inputmode="decimal" data-schedule-index="${index}" data-schedule-field="latitude" value="${escapeHtml(String(entry.latitude))}" placeholder="37.3836804"></label>
+        <label><span>LONGITUDE</span><input class="mono" inputmode="decimal" data-schedule-index="${index}" data-schedule-field="longitude" value="${escapeHtml(String(entry.longitude))}" placeholder="-122.1367207"></label>
+      </div>
+    </section>`).join("");
+  updateSchedulePanel();
+}
+
+function updateScheduleDraftFromEvent(event) {
+  const target = event.target;
+  const index = Number(target.dataset.scheduleIndex);
+  const entry = state.locationSchedule.entries[index];
+  if (!entry) return;
+  if (target.dataset.scheduleField) {
+    entry[target.dataset.scheduleField] = target.value;
+  } else if (target.dataset.scheduleDay) {
+    entry.days = scheduleDayLabels
+      .map(([day]) => day)
+      .filter(day => document.querySelector(
+        `[data-schedule-index="${index}"][data-schedule-day="${day}"]`
+      )?.checked);
+  } else {
+    return;
+  }
+  state.locationSchedule.dirty = true;
+  state.locationSchedule.error = "";
+}
+
+function addScheduleWindow() {
+  const number = state.locationSchedule.entries.length + 1;
+  state.locationSchedule.entries.push({
+    label: `Location ${number}`,
+    days: ["mon", "tue", "wed", "thu", "fri"],
+    start: "17:00",
+    end: "18:00",
+    latitude: "",
+    longitude: ""
+  });
+  state.locationSchedule.dirty = true;
+  renderScheduleEntries();
+}
+
+function removeScheduleWindow(index) {
+  if (state.locationSchedule.entries.length <= 1) return;
+  state.locationSchedule.entries.splice(index, 1);
+  state.locationSchedule.dirty = true;
+  renderScheduleEntries();
+}
+
+function locationSchedulePayload() {
+  const draft = state.locationSchedule;
+  if (!draft.name.trim()) throw new Error("Enter a schedule name.");
+  if (!draft.timezone.trim()) throw new Error("Enter an IANA timezone.");
+  if (!draft.entries.length) throw new Error("Add at least one location window.");
+  return {
+    name: draft.name.trim(),
+    timezone: draft.timezone.trim(),
+    entries: draft.entries.map((entry, index) => {
+      const latitude = Number(String(entry.latitude).trim());
+      const longitude = Number(String(entry.longitude).trim());
+      if (!entry.label.trim()) throw new Error(`Window ${index + 1} needs a location name.`);
+      if (!entry.days.length) throw new Error(`Window ${index + 1} needs at least one repeat day.`);
+      if (!entry.start || !entry.end) throw new Error(`Window ${index + 1} needs start and end times.`);
+      if (!Number.isFinite(latitude) || latitude < -90 || latitude > 90) {
+        throw new Error(`Window ${index + 1} latitude must be between -90 and 90.`);
       }
-    );
-    state.itineraryPlanner.status = "review";
-  } catch (error) {
-    state.itineraryPlanner.status = "error";
-    state.itineraryPlanner.error = error.message || "The schedule could not be interpreted.";
-  }
-  updateItineraryPanel();
+      if (!Number.isFinite(longitude) || longitude < -180 || longitude > 180) {
+        throw new Error(`Window ${index + 1} longitude must be between -180 and 180.`);
+      }
+      return {
+        label: entry.label.trim(),
+        days: [...entry.days],
+        start: entry.start,
+        end: entry.end,
+        latitude,
+        longitude
+      };
+    })
+  };
 }
 
-async function buildConfirmedItinerary() {
-  const planner = state.itineraryPlanner;
-  const places = planner.review?.resolvedPlaces || [];
-  if (!places.length || places.some(place => !planner.confirmedPlaceIds.has(place.id))) {
-    planner.status = "error";
-    planner.error = "Confirm every resolved place before building the GPX.";
-    updateItineraryPanel();
+async function activateLocationSchedule() {
+  const draft = state.locationSchedule;
+  if (!state.backend.available || !supportsBackendCapability("locationScheduling")) {
+    draft.error = "Start or restart the local controller to enable location scheduling.";
+    updateSchedulePanel();
     return;
   }
-  if (isDevicePlaybackActive()) {
-    planner.status = "error";
-    planner.error = "Stop device playback before generating another route.";
-    updateItineraryPanel();
-    return;
-  }
-
-  planner.status = "building";
-  planner.error = "";
-  updateItineraryPanel();
   try {
-    const response = await apiRequest("/api/routes/from-itinerary", {
+    const payload = locationSchedulePayload();
+    draft.saving = true;
+    draft.error = "";
+    updateSchedulePanel();
+    state.backend.schedule = await apiRequest("/api/schedule/activate", {
       method: "POST",
-      body: JSON.stringify({
-        confirmed: true,
-        itinerary: planner.review.itinerary,
-        resolvedPlaces: places
-      })
+      body: JSON.stringify(payload)
     });
-    acceptGeneratedRoutePreview(response);
-    planner.status = "ready";
-    planner.error = "";
+    draft.dirty = false;
+    draft.loadedSignature = JSON.stringify(state.backend.schedule.schedule || null);
   } catch (error) {
-    planner.status = "error";
-    planner.error = error.message || "The itinerary GPX could not be generated.";
+    draft.error = error.message || "The schedule could not be activated.";
+  } finally {
+    draft.saving = false;
+    updateSchedulePanel();
   }
-  updateItineraryPanel();
 }
 
-function updateItineraryPanel() {
-  const planner = state.itineraryPlanner;
-  const card = document.querySelector('[data-live-card="itinerary"]');
-  const interpretButton = document.querySelector('[data-action="interpret-itinerary"]');
-  const buildButton = document.querySelector('[data-action="build-itinerary"]');
-  const review = document.querySelector("[data-itinerary-review]");
-  if (!card || !interpretButton || !buildButton || !review) return;
+async function stopLocationSchedule() {
+  const draft = state.locationSchedule;
+  draft.saving = true;
+  draft.error = "";
+  updateSchedulePanel();
+  try {
+    state.backend.schedule = await apiRequest("/api/schedule/stop", {
+      method: "POST",
+      body: "{}"
+    });
+  } catch (error) {
+    draft.error = error.message || "The schedule could not be stopped.";
+  } finally {
+    draft.saving = false;
+    updateSchedulePanel();
+  }
+}
 
-  const busy = ["interpreting", "building"].includes(planner.status);
-  const places = planner.review?.resolvedPlaces || [];
-  const allConfirmed = places.length > 0
-    && places.every(place => planner.confirmedPlaceIds.has(place.id));
-  card.classList.toggle("ready", ["review", "ready"].includes(planner.status));
-  card.classList.toggle("error", planner.status === "error");
-  card.classList.toggle("loading", busy);
-  interpretButton.disabled = busy || isDevicePlaybackActive()
+function loadScheduleDraftFromBackend(scheduleStatus) {
+  const definition = scheduleStatus?.schedule;
+  const draft = state.locationSchedule;
+  if (!definition || draft.dirty) return;
+  const signature = JSON.stringify(definition);
+  if (signature === draft.loadedSignature) return;
+  draft.loadedSignature = signature;
+  draft.name = definition.name || "Weekly location schedule";
+  draft.timezone = definition.timezone || browserTimezone();
+  draft.entries = (definition.entries || []).map(entry => ({
+    label: entry.label || "Location",
+    days: Array.isArray(entry.days) ? [...entry.days] : [],
+    start: entry.start || "09:00",
+    end: entry.end || "17:00",
+    latitude: String(entry.latitude ?? ""),
+    longitude: String(entry.longitude ?? "")
+  }));
+  const nameInput = document.querySelector('[data-schedule-input="name"]');
+  const timezoneInput = document.querySelector('[data-schedule-input="timezone"]');
+  if (nameInput) nameInput.value = draft.name;
+  if (timezoneInput) timezoneInput.value = draft.timezone;
+  renderScheduleEntries();
+}
+
+function scheduleMomentText(value, timezoneName) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value || "—";
+  return new Intl.DateTimeFormat(undefined, {
+    weekday: "short",
+    hour: "numeric",
+    minute: "2-digit",
+    timeZone: timezoneName || browserTimezone()
+  }).format(date);
+}
+
+function updateSchedulePanel() {
+  const draft = state.locationSchedule;
+  const schedule = state.backend.schedule;
+  const card = document.querySelector('[data-live-card="schedule"]');
+  const activateButton = document.querySelector('[data-action="activate-schedule"]');
+  const stopButton = document.querySelector('[data-action="stop-schedule"]');
+  const addButton = document.querySelector('[data-action="add-schedule-window"]');
+  if (!card || !activateButton || !stopButton || !addButton) return;
+
+  const enabled = !!schedule?.enabled;
+  const serverError = schedule?.state === "error" ? schedule.error : "";
+  const error = draft.error || serverError;
+  card.classList.toggle("ready", enabled && !error);
+  card.classList.toggle("error", !!error);
+  card.classList.toggle("loading", draft.saving);
+  activateButton.disabled = draft.saving || isDevicePlaybackActive()
     || !state.backend.available
-    || !supportsBackendCapability("itineraryPlanning");
-  interpretButton.textContent = planner.status === "interpreting"
-    ? "INTERPRETING…"
-    : "INTERPRET SCHEDULE";
-  document.querySelectorAll("[data-itinerary-input]").forEach(input => {
-    input.disabled = busy || isDevicePlaybackActive();
+    || !supportsBackendCapability("locationScheduling");
+  activateButton.textContent = draft.saving ? "SAVING…" : "SAVE & ACTIVATE";
+  stopButton.disabled = draft.saving || !enabled;
+  addButton.disabled = draft.saving || state.locationSchedule.entries.length >= 64;
+  document.querySelectorAll(
+    "[data-schedule-input], [data-schedule-field], [data-schedule-day], [data-remove-schedule-window]"
+  ).forEach(input => {
+    input.disabled = draft.saving
+      || (input.matches("[data-remove-schedule-window]") && draft.entries.length === 1);
   });
 
-  review.hidden = !places.length;
-  buildButton.hidden = !places.length;
-  buildButton.disabled = busy || !allConfirmed || isDevicePlaybackActive();
-  buildButton.textContent = planner.status === "building"
-    ? "BUILDING GPX…"
-    : "CONFIRM PLACES & BUILD GPX";
-  if (places.length) {
-    const segments = planner.review.itinerary?.segments || [];
-    const placeLabels = new Map(
-      (planner.review.itinerary?.places || []).map(place => [place.id, place.label])
+  if (draft.saving) {
+    setText("schedule-status", "Saving location schedule");
+    setText("schedule-detail", "The controller is validating the windows and applying the current one.");
+  } else if (error) {
+    setText("schedule-status", "Schedule needs attention");
+    setText("schedule-detail", error);
+  } else if (schedule?.state === "active" && schedule.activeWindow) {
+    setText("schedule-status", `${schedule.activeWindow.label} is active`);
+    setText(
+      "schedule-detail",
+      `Holding ${Number(schedule.activeWindow.latitude).toFixed(7)}, ${Number(schedule.activeWindow.longitude).toFixed(7)} until ${scheduleMomentText(schedule.activeWindow.endsAt, schedule.schedule?.timezone)}.`
     );
-    review.innerHTML = `
-      <div class="itinerary-review-heading">
-        <strong>${escapeHtml(planner.review.itinerary?.name || "Interpreted schedule")}</strong>
-        <span>${segments.length} segments · ${escapeHtml(planner.review.itinerary?.timezone || "")}</span>
-      </div>
-      <div class="itinerary-timeline">
-        ${segments.map(segment => {
-          const start = String(segment.start || "").slice(11, 16);
-          const end = String(segment.end || "").slice(11, 16);
-          const activity = segment.kind === "stay"
-            ? `Stay at ${placeLabels.get(segment.placeId) || segment.placeId}`
-            : `Drive ${placeLabels.get(segment.originId) || segment.originId} → ${placeLabels.get(segment.destinationId) || segment.destinationId}`;
-          return `<div><code>${escapeHtml(start)}–${escapeHtml(end)}</code><span>${escapeHtml(activity)}</span></div>`;
-        }).join("")}
-      </div>
-      ${places.map(place => `
-        <label class="itinerary-place">
-          <input type="checkbox" data-itinerary-confirm="${escapeHtml(place.id)}"${planner.confirmedPlaceIds.has(place.id) ? " checked" : ""}>
-          <span>
-            <strong>${escapeHtml(place.label)}</strong>
-            <small>${escapeHtml(place.displayName)}</small>
-            <code>${Number(place.latitude).toFixed(6)}, ${Number(place.longitude).toFixed(6)}</code>
-          </span>
-        </label>`).join("")}
-      ${(planner.review.itinerary?.assumptions || []).length ? `
-        <div class="itinerary-assumptions"><strong>ASSUMPTIONS</strong>${planner.review.itinerary.assumptions.map(value => `<span>${escapeHtml(value)}</span>`).join("")}</div>` : ""}`;
-    review.querySelectorAll("[data-itinerary-confirm]").forEach(input => {
-      input.addEventListener("change", () => {
-        if (input.checked) planner.confirmedPlaceIds.add(input.dataset.itineraryConfirm);
-        else planner.confirmedPlaceIds.delete(input.dataset.itineraryConfirm);
-        updateItineraryPanel();
-      });
-    });
-  }
-
-  if (planner.status === "interpreting") {
-    setText("itinerary-status", "Interpreting your schedule");
-    setText("itinerary-detail", "OpenAI is producing a strict stay-and-travel timeline.");
-  } else if (planner.status === "building") {
-    setText("itinerary-status", "Building timed road geometry");
-    setText("itinerary-detail", "Stationary hours stay sparse while travel follows the road network.");
-  } else if (planner.status === "review") {
-    setText("itinerary-status", "Review every resolved place");
-    setText("itinerary-detail", "Check each match below. Reword the description and interpret again if one is wrong.");
-  } else if (planner.status === "ready") {
-    setText("itinerary-status", "Timed itinerary GPX is ready");
-    setText("itinerary-detail", "It is selected under Import GPX; prepare it to preserve its sparse source timing.");
-  } else if (planner.status === "error") {
-    setText("itinerary-status", "Itinerary needs attention");
-    setText("itinerary-detail", planner.error);
+  } else if (enabled && schedule?.nextWindow) {
+    setText("schedule-status", "Schedule is waiting");
+    setText(
+      "schedule-detail",
+      `Next: ${schedule.nextWindow.label} at ${scheduleMomentText(schedule.nextWindow.startsAt, schedule.schedule?.timezone)}. Real GPS is used outside windows.`
+    );
+  } else if (enabled) {
+    setText("schedule-status", "Weekly schedule is active");
+    setText("schedule-detail", "The controller is waiting for the next matching location window.");
   } else if (!state.backend.available) {
-    setText("itinerary-status", "Local backend required");
-    setText("itinerary-detail", "Start the controller to use natural-language itinerary planning.");
-  } else if (!state.backend.llm?.configured) {
-    setText("itinerary-status", "OpenAI key not configured");
-    setText("itinerary-detail", "Set OPENAI_API_KEY in the terminal and restart the controller.");
+    setText("schedule-status", "Local backend required");
+    setText("schedule-detail", "Start the controller to run repeating location windows.");
+  } else if (!supportsBackendCapability("locationScheduling")) {
+    setText("schedule-status", "Controller restart required");
+    setText("schedule-detail", "Restart the local controller to load weekly scheduling.");
   } else {
-    setText("itinerary-status", "Describe a day to build a timed route");
-    setText("itinerary-detail", `Using ${state.backend.llm.model || "the configured OpenAI model"}; every place requires confirmation.`);
+    setText("schedule-status", "Build a weekly location schedule");
+    setText("schedule-detail", "The device uses real GPS outside scheduled windows.");
   }
 }
 
@@ -1684,7 +1775,8 @@ async function refreshBackendStatus() {
     state.backend.apiVersion = Number(payload.apiVersion) || 1;
     state.backend.capabilities = payload.capabilities || {};
     state.backend.deviceReport = payload.device || null;
-    state.backend.llm = payload.llm || null;
+    state.backend.schedule = payload.schedule || null;
+    loadScheduleDraftFromBackend(state.backend.schedule);
     state.backend.device = parseDevice(payload.device);
     renderDeviceSelector(payload.device);
     state.backend.playback = payload.playback || { state: "idle" };
@@ -1728,7 +1820,7 @@ async function refreshBackendStatus() {
     state.backend.capabilities = {};
     state.backend.device = null;
     state.backend.deviceReport = null;
-    state.backend.llm = null;
+    state.backend.schedule = null;
     state.backend.error = "";
     state.backend.playback = { state: "idle" };
     if (["active", "recovering"].includes(state.staticLocation.status)) {
@@ -1901,8 +1993,6 @@ function renderImportedRouteList() {
       || metadata.filename;
     const sourceLabel = metadata.sourceType === "google-maps"
       ? "Google Maps"
-      : metadata.sourceType === "llm-itinerary"
-        ? "AI itinerary"
       : metadata.sourceType === "directions"
         ? "Generated"
         : "Imported";
@@ -1967,7 +2057,7 @@ function updateImportPanel() {
     setText("import-status", metadata.name || metadata.originalFilename || "Imported route");
     setText(
       "import-detail",
-      `${metadata.pointCount.toLocaleString()} points · ${["directions", "google-maps", "llm-itinerary"].includes(metadata.sourceType) ? `${metadata.provider} ${formatDistance(metadata.distanceMeters)} ${metadata.sourceType === "llm-itinerary" ? `schedule ${durationMinutes(metadata.estimatedDurationSeconds)}` : `ETA ${durationMinutes(metadata.estimatedDurationSeconds)}`}` : prepared ? `${timingModeLabel(prepared)} ${durationMinutes(prepared.durationSeconds)}` : metadata.hasTimestamps ? "timestamps available" : "road timing available when prepared"} · saved as ${metadata.filename}`
+      `${metadata.pointCount.toLocaleString()} points · ${["directions", "google-maps"].includes(metadata.sourceType) ? `${metadata.provider} ${formatDistance(metadata.distanceMeters)} ETA ${durationMinutes(metadata.estimatedDurationSeconds)}` : prepared ? `${timingModeLabel(prepared)} ${durationMinutes(prepared.durationSeconds)}` : metadata.hasTimestamps ? "timestamps available" : "road timing available when prepared"} · saved as ${metadata.filename}`
     );
   } else if (imported.status === "error") {
     setText("import-status", "Import failed");
@@ -3137,7 +3227,7 @@ function updateLiveState() {
   });
   updateImportPanel();
   updateRouteBuilderPanel();
-  updateItineraryPanel();
+  updateSchedulePanel();
   updateStaticLocationPanel();
   renderDeviceSelector(state.backend.deviceReport);
 

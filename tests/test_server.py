@@ -3,6 +3,7 @@ import json
 import signal
 import subprocess
 import time
+from datetime import datetime, timezone
 from io import StringIO
 from http.server import ThreadingHTTPServer
 from pathlib import Path
@@ -32,6 +33,7 @@ from route_controller.directions import (
     GeneratedDirections,
 )
 from route_controller.routes import RouteRecord, RouteRegistry, RouteRegistryError
+from route_controller.schedule import LocationScheduleController
 from route_controller.timing import RoadTimingEstimate
 
 
@@ -667,6 +669,112 @@ def test_static_location_endpoint_sets_reports_and_clears(
         "--udid",
         IPAD.identifier,
     ]
+
+
+def test_schedule_endpoint_activates_reports_and_stops(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    processes = []
+
+    def fake_popen(arguments, **kwargs):
+        process = FakeProcess(arguments, **kwargs)
+        processes.append(process)
+        return process
+
+    monkeypatch.setattr(
+        "route_controller.server.resolve_executable",
+        lambda _: "pymobiledevice3",
+    )
+    monkeypatch.setattr("route_controller.server.subprocess.Popen", fake_popen)
+    monkeypatch.setattr(
+        "route_controller.server.subprocess.run",
+        lambda arguments, **kwargs: subprocess.CompletedProcess(
+            arguments, 0, "", ""
+        ),
+    )
+
+    class ScheduleHandler(RouteRequestHandler):
+        registry = RouteRegistry(tmp_path)
+
+    ScheduleHandler.manager = PlaybackManager(
+        userspace=True,
+        registry=ScheduleHandler.registry,
+        device_provider=ipad_provider,
+        process_startup_grace_seconds=0,
+    )
+    ScheduleHandler.schedule_controller = LocationScheduleController(
+        tmp_path / "schedule.json",
+        set_location=ScheduleHandler.manager.set_location,
+        clear_location=ScheduleHandler.manager.clear_location,
+        now=lambda: datetime(2026, 8, 17, 16, 30, tzinfo=timezone.utc),
+        poll_seconds=60,
+        process_factory=fake_popen,
+    )
+    server = ThreadingHTTPServer(("127.0.0.1", 0), ScheduleHandler)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    connection = http.client.HTTPConnection(
+        "127.0.0.1",
+        server.server_address[1],
+        timeout=5,
+    )
+    request = {
+        "name": "Work week",
+        "timezone": "America/Los_Angeles",
+        "entries": [
+            {
+                "label": "Office",
+                "days": ["mon", "tue", "wed", "thu", "fri"],
+                "start": "09:00",
+                "end": "17:00",
+                "latitude": 37.38368040757789,
+                "longitude": -122.13672073499355,
+            }
+        ],
+    }
+    try:
+        connection.request(
+            "POST",
+            "/api/schedule/activate",
+            body=json.dumps(request),
+            headers={"Content-Type": "application/json"},
+        )
+        activate_response = connection.getresponse()
+        activated = json.loads(activate_response.read())
+
+        connection.request("GET", "/api/status")
+        status_response = connection.getresponse()
+        status = json.loads(status_response.read())
+
+        connection.request(
+            "POST",
+            "/api/schedule/stop",
+            body="{}",
+            headers={"Content-Type": "application/json"},
+        )
+        stop_response = connection.getresponse()
+        stopped = json.loads(stop_response.read())
+    finally:
+        connection.close()
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+        ScheduleHandler.schedule_controller.shutdown()
+
+    assert activate_response.status == 200
+    assert activated["state"] == "active"
+    assert activated["activeWindow"]["label"] == "Office"
+    assert status_response.status == 200
+    assert status["apiVersion"] == 5
+    assert status["capabilities"]["locationScheduling"] is True
+    assert "llm" not in status
+    assert status["schedule"]["enabled"] is True
+    assert status["simulatedLocation"]["latitude"] == 37.38368040757789
+    assert stop_response.status == 200
+    assert stopped["state"] == "disabled"
+    assert stopped["enabled"] is False
+    assert ScheduleHandler.manager.simulated_location() is None
 
 
 def test_friendly_device_error_explains_tunneld_recovery() -> None:

@@ -42,21 +42,6 @@ from .google_maps import (
     GoogleMapsLinkValidationError,
     resolve_google_maps_directions_link,
 )
-from .itinerary import (
-    GeocodingError,
-    ItineraryPlanner,
-    ItineraryProviderError,
-    ItineraryValidationError,
-    NominatimGeocoder,
-    OpenAIItineraryPlanner,
-    PlaceGeocoder,
-    compose_itinerary,
-    itinerary_payload,
-    parse_itinerary,
-    parse_resolved_places,
-    resolved_place_payload,
-    validate_planner_request,
-)
 from .playback import (
     clear_arguments,
     play_arguments,
@@ -64,6 +49,11 @@ from .playback import (
     set_arguments,
 )
 from .routes import RouteRecord, RouteRegistry, RouteRegistryError
+from .schedule import (
+    LocationScheduleController,
+    ScheduleStorageError,
+    ScheduleValidationError,
+)
 from .timing import (
     DEFAULT_OSRM_URL,
     OsrmRouteTimingProvider,
@@ -75,6 +65,7 @@ ROOT = Path(__file__).resolve().parents[2]
 FRONTEND_DIR = ROOT / "frontend"
 IMPORTS_DIR = ROOT / "routes" / "imports"
 GENERATED_DIR = ROOT / "routes" / "generated"
+SCHEDULE_PATH = ROOT / "routes" / "schedules" / "location-schedule.json"
 MAX_GPX_CONTENT_BYTES = 5 * 1024 * 1024
 MAX_JSON_REQUEST_BYTES = MAX_GPX_CONTENT_BYTES + (1024 * 1024)
 MAX_ROUTE_PREVIEW_POINTS = 8000
@@ -85,26 +76,12 @@ DEFAULT_TIMING_PROVIDER = OsrmRouteTimingProvider(
 DEFAULT_DIRECTIONS_PROVIDER = OsrmDirectionsProvider(
     os.environ.get("ROUTE_CONTROLLER_OSRM_URL") or DEFAULT_OSRM_URL
 )
-_OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "").strip()
-DEFAULT_ITINERARY_PLANNER: Optional[ItineraryPlanner] = (
-    OpenAIItineraryPlanner(
-        _OPENAI_API_KEY,
-        model=os.environ.get("ROUTE_CONTROLLER_LLM_MODEL", "gpt-5.4-mini"),
-    )
-    if _OPENAI_API_KEY
-    else None
-)
-DEFAULT_GEOCODER: PlaceGeocoder = NominatimGeocoder(
-    IMPORTS_DIR / ".geocode-cache.json",
-    base_url=os.environ.get("ROUTE_CONTROLLER_GEOCODER_URL")
-    or "https://nominatim.openstreetmap.org",
-)
 BACKEND_CAPABILITIES = {
     "deleteImports": True,
     "deviceSelection": True,
     "directionsGeneration": True,
     "googleMapsLinks": True,
-    "itineraryPlanning": True,
+    "locationScheduling": True,
     "nullableDuration": True,
     "routeAwareTiming": True,
     "staticLocation": True,
@@ -802,8 +779,7 @@ class RouteRequestHandler(BaseHTTPRequestHandler):
     generated_directory = GENERATED_DIR
     timing_provider: Optional[RoadTimingProvider] = DEFAULT_TIMING_PROVIDER
     directions_provider: Optional[DirectionsProvider] = DEFAULT_DIRECTIONS_PROVIDER
-    itinerary_planner: Optional[ItineraryPlanner] = DEFAULT_ITINERARY_PLANNER
-    geocoder: Optional[PlaceGeocoder] = DEFAULT_GEOCODER
+    schedule_controller: Optional[LocationScheduleController] = None
     google_maps_link_expander: Optional[GoogleMapsLinkExpander] = None
 
     def do_HEAD(self) -> None:
@@ -827,22 +803,16 @@ class RouteRequestHandler(BaseHTTPRequestHandler):
             if parsed.path == "/api/status":
                 self._send_json(
                     {
-                        "apiVersion": 4,
+                        "apiVersion": 5,
                         "capabilities": BACKEND_CAPABILITIES,
                         "device": self.manager.device_status(),
                         "playback": self.manager.status(),
                         "simulatedLocation": self.manager.simulated_location(),
-                        "llm": {
-                            "configured": self.itinerary_planner is not None,
-                            "provider": "OpenAI",
-                            "model": (
-                                self.itinerary_planner.model
-                                if self.itinerary_planner is not None
-                                else os.environ.get(
-                                    "ROUTE_CONTROLLER_LLM_MODEL", "gpt-5.4-mini"
-                                )
-                            ),
-                        },
+                        "schedule": (
+                            self.schedule_controller.status()
+                            if self.schedule_controller is not None
+                            else _disabled_schedule_status()
+                        ),
                     }
                 )
                 return
@@ -916,21 +886,33 @@ class RouteRequestHandler(BaseHTTPRequestHandler):
                 )
                 self._send_json(generated, status=HTTPStatus.CREATED)
                 return
-            if parsed.path == "/api/itineraries/interpret":
-                interpreted = interpret_itinerary_request(
-                    self._read_json_body(),
-                    planner=self.itinerary_planner,
-                    geocoder=self.geocoder,
-                )
-                self._send_json(interpreted)
+            if parsed.path == "/api/schedule/activate":
+                controller = self._require_schedule_controller()
+                if self.manager.status().get("state") != "idle":
+                    raise ApiError(
+                        HTTPStatus.CONFLICT,
+                        "Stop route playback before activating a location schedule",
+                        code="playback_active",
+                    )
+                try:
+                    scheduled = controller.save_and_start(self._read_json_body())
+                except ScheduleValidationError as error:
+                    raise ApiError(
+                        HTTPStatus.BAD_REQUEST,
+                        str(error),
+                        code="invalid_schedule",
+                    ) from error
+                except ScheduleStorageError as error:
+                    raise ApiError(
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        str(error),
+                        code="schedule_write_failed",
+                    ) from error
+                self._send_json(scheduled)
                 return
-            if parsed.path == "/api/routes/from-itinerary":
-                generated = generate_itinerary_gpx(
-                    self._read_json_body(),
-                    imports_directory=self.imports_directory,
-                    directions_provider=self.directions_provider,
-                )
-                self._send_json(generated, status=HTTPStatus.CREATED)
+            if parsed.path == "/api/schedule/stop":
+                controller = self._require_schedule_controller()
+                self._send_json(controller.stop(clear_location=True))
                 return
             if parsed.path == "/api/routes/from-directions":
                 generated = generate_directions_gpx(
@@ -968,6 +950,7 @@ class RouteRequestHandler(BaseHTTPRequestHandler):
                 return
             if parsed.path.startswith("/api/routes/") and parsed.path.endswith("/start"):
                 route_id = unquote(parsed.path.split("/")[-2])
+                self._stop_schedule_for_manual_control()
                 self._send_json(self.manager.start(route_id))
                 return
             if parsed.path == "/api/playback/stop":
@@ -980,10 +963,12 @@ class RouteRequestHandler(BaseHTTPRequestHandler):
                 self._send_json(self.manager.resume())
                 return
             if parsed.path == "/api/location/clear":
+                self._stop_schedule_for_manual_control()
                 self.manager.stop(clear_location=False)
                 self._send_json(self.manager.clear_location())
                 return
             if parsed.path == "/api/location/set":
+                self._stop_schedule_for_manual_control()
                 latitude, longitude = static_location_coordinates(
                     self._read_json_body()
                 )
@@ -1085,6 +1070,19 @@ class RouteRequestHandler(BaseHTTPRequestHandler):
                 code="invalid_json",
             ) from error
 
+    def _require_schedule_controller(self) -> LocationScheduleController:
+        if self.schedule_controller is None:
+            raise ApiError(
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                "Location scheduling is not available until the controller is restarted",
+                code="schedule_unavailable",
+            )
+        return self.schedule_controller
+
+    def _stop_schedule_for_manual_control(self) -> None:
+        if self.schedule_controller is not None:
+            self.schedule_controller.stop(clear_location=False)
+
     def log_message(self, format: str, *args: Any) -> None:
         return
 
@@ -1124,6 +1122,19 @@ class RouteRequestHandler(BaseHTTPRequestHandler):
 def route_payloads(registry: Optional[RouteRegistry] = None) -> list[dict[str, Any]]:
     active_registry = registry or DEFAULT_REGISTRY
     return [route_payload(route.id, active_registry) for route in active_registry.all()]
+
+
+def _disabled_schedule_status() -> dict[str, Any]:
+    return {
+        "state": "disabled",
+        "enabled": False,
+        "schedule": None,
+        "activeWindow": None,
+        "nextWindow": None,
+        "nextTransitionAt": None,
+        "lastAppliedAt": None,
+        "preventingIdleSleep": False,
+    }
 
 
 def static_location_coordinates(payload: Any) -> tuple[float, float]:
@@ -1305,178 +1316,6 @@ def import_gpx_payload(
         summary,
         original_filename=original_filename,
     )
-
-
-def interpret_itinerary_request(
-    payload: Any,
-    *,
-    planner: Optional[ItineraryPlanner],
-    geocoder: Optional[PlaceGeocoder],
-) -> dict[str, Any]:
-    if not isinstance(payload, dict):
-        raise ApiError(
-            HTTPStatus.BAD_REQUEST,
-            "Request body must be a JSON object",
-            code="invalid_itinerary_request",
-        )
-    if planner is None:
-        raise ApiError(
-            HTTPStatus.SERVICE_UNAVAILABLE,
-            "Itinerary planning is not configured. Set OPENAI_API_KEY and restart the controller.",
-            code="llm_not_configured",
-        )
-    if geocoder is None:
-        raise ApiError(
-            HTTPStatus.SERVICE_UNAVAILABLE,
-            "No place geocoder is configured",
-            code="geocoder_not_configured",
-        )
-    try:
-        description, day, timezone_name = validate_planner_request(
-            payload.get("description"),
-            payload.get("date"),
-            payload.get("timezone"),
-        )
-        itinerary = planner.interpret(
-            description,
-            day=day,
-            timezone_name=timezone_name,
-        )
-        resolved = tuple(geocoder.geocode(place) for place in itinerary.places)
-    except ItineraryValidationError as error:
-        raise ApiError(
-            HTTPStatus.BAD_REQUEST,
-            str(error),
-            code="invalid_itinerary_request",
-        ) from error
-    except ItineraryProviderError as error:
-        raise ApiError(
-            HTTPStatus.BAD_GATEWAY,
-            str(error),
-            code="itinerary_provider_failed",
-        ) from error
-    except GeocodingError as error:
-        raise ApiError(
-            HTTPStatus.UNPROCESSABLE_ENTITY,
-            str(error),
-            code="place_not_resolved",
-        ) from error
-    return {
-        "itinerary": itinerary_payload(itinerary),
-        "resolvedPlaces": [resolved_place_payload(place) for place in resolved],
-        "interpretation": {
-            "provider": "OpenAI",
-            "model": planner.model,
-            "geocoder": geocoder.name,
-            "requiresConfirmation": True,
-        },
-    }
-
-
-def generate_itinerary_gpx(
-    payload: Any,
-    *,
-    imports_directory: Path = IMPORTS_DIR,
-    directions_provider: Optional[DirectionsProvider] = DEFAULT_DIRECTIONS_PROVIDER,
-) -> dict[str, Any]:
-    if not isinstance(payload, dict):
-        raise ApiError(
-            HTTPStatus.BAD_REQUEST,
-            "Request body must be a JSON object",
-            code="invalid_itinerary_request",
-        )
-    if payload.get("confirmed") is not True:
-        raise ApiError(
-            HTTPStatus.BAD_REQUEST,
-            "Review and confirm every resolved place before building the GPX",
-            code="itinerary_confirmation_required",
-        )
-    if directions_provider is None:
-        raise ApiError(
-            HTTPStatus.SERVICE_UNAVAILABLE,
-            "No directions provider is configured",
-            code="directions_unavailable",
-        )
-    try:
-        itinerary = parse_itinerary(payload.get("itinerary"))
-        resolved = parse_resolved_places(payload.get("resolvedPlaces"), itinerary)
-        composed = compose_itinerary(
-            itinerary,
-            resolved,
-            directions_provider=directions_provider,
-        )
-        content = track_xml(itinerary.name, composed.points)
-    except ItineraryValidationError as error:
-        raise ApiError(
-            HTTPStatus.BAD_REQUEST,
-            str(error),
-            code="invalid_itinerary_request",
-        ) from error
-    except ItineraryProviderError as error:
-        raise ApiError(
-            HTTPStatus.BAD_GATEWAY,
-            str(error),
-            code="directions_unavailable",
-        ) from error
-    except GpxValidationError as error:
-        raise ApiError(
-            HTTPStatus.BAD_GATEWAY,
-            "The itinerary could not be converted to GPX",
-            detail=str(error),
-            code="itinerary_invalid_gpx",
-        ) from error
-    if len(content.encode("utf-8")) > MAX_GPX_CONTENT_BYTES:
-        raise ApiError(
-            HTTPStatus.BAD_GATEWAY,
-            "The generated itinerary is too large to store safely",
-            code="itinerary_route_too_large",
-        )
-
-    imports_directory.mkdir(parents=True, exist_ok=True)
-    stored_path = _write_unique_import(
-        imports_directory,
-        _safe_import_filename(f"{itinerary.name}.gpx"),
-        content,
-    )
-    first_place = next(
-        place for place in resolved if place.id == _itinerary_location_id(itinerary.segments[0], True)
-    )
-    last_place = next(
-        place for place in resolved if place.id == _itinerary_location_id(itinerary.segments[-1], False)
-    )
-    metadata = {
-        "sourceType": "llm-itinerary",
-        "provider": ", ".join(composed.directions_providers) or "stationary",
-        "distanceMeters": composed.distance_meters,
-        "estimatedDurationSeconds": (
-            composed.points[-1].time - composed.points[0].time
-        ).total_seconds(),
-        "travelSeconds": composed.travel_seconds,
-        "originLabel": first_place.label,
-        "destinationLabel": last_place.label,
-        "originalFilename": stored_path.name,
-        "itinerary": itinerary_payload(itinerary),
-        "resolvedPlaces": [resolved_place_payload(place) for place in resolved],
-    }
-    try:
-        _write_import_metadata(stored_path, metadata)
-    except ApiError:
-        stored_path.unlink(missing_ok=True)
-        raise
-    summary = inspect_gpx_content(content, fallback_name=itinerary.name)
-    response = _imported_gpx_payload(
-        stored_path,
-        summary,
-        original_filename=stored_path.name,
-    )
-    response["previewPoints"] = _preview_points_payload(list(composed.points))
-    return response
-
-
-def _itinerary_location_id(segment: Any, at_start: bool) -> str:
-    if segment.kind == "stay":
-        return segment.place_id
-    return segment.origin_id if at_start else segment.destination_id
 
 
 def generate_directions_gpx(
@@ -1948,14 +1787,11 @@ def prepare_imported_gpx(
 
     try:
         source_metadata = _read_import_metadata(source_path)
-        preserve_sparse_itinerary = (
-            source_metadata.get("sourceType") == "llm-itinerary"
-        )
         prepared = prepare_gpx_playback_result(
             content,
             fallback_name=source_path.stem,
             duration_seconds=duration_seconds,
-            interpolate_seconds=None if preserve_sparse_itinerary else 0.5,
+            interpolate_seconds=0.5,
             start_time=datetime.now(timezone.utc).replace(microsecond=0),
             timing_mode=timing_mode,
             timing_provider=timing_provider,
@@ -2180,17 +2016,14 @@ _IMPORT_METADATA_FIELDS = {
     "distanceMeters",
     "destinationLabel",
     "estimatedDurationSeconds",
-    "itinerary",
     "originalFilename",
     "originLabel",
     "provider",
-    "resolvedPlaces",
     "requestedDestination",
     "requestedOrigin",
     "sourceType",
     "sourceUrlHost",
     "sourceWasShortened",
-    "travelSeconds",
 }
 
 
@@ -2259,6 +2092,11 @@ def run_server(host: str = "127.0.0.1", port: int = 8765) -> None:
     handler = RouteRequestHandler
     handler.registry = DEFAULT_REGISTRY
     handler.manager = PlaybackManager(userspace=True, registry=DEFAULT_REGISTRY)
+    handler.schedule_controller = LocationScheduleController(
+        SCHEDULE_PATH,
+        set_location=handler.manager.set_location,
+        clear_location=handler.manager.clear_location,
+    )
     server = ThreadingHTTPServer((host, port), handler)
 
     def stop_server(signum: int, frame: Any) -> None:
@@ -2270,4 +2108,5 @@ def run_server(host: str = "127.0.0.1", port: int = 8765) -> None:
     try:
         server.serve_forever()
     finally:
+        handler.schedule_controller.shutdown()
         handler.manager.stop(clear_location=True)

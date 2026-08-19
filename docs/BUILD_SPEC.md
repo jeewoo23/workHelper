@@ -20,7 +20,8 @@ Build a local macOS route-control application that can:
 4. Play the return route from **L2 to L1**.
 5. Show the current simulated position, progress, elapsed time, and remaining time.
 6. Pause, resume, stop, and restore the phone's real location.
-7. Later, generate new road-following routes from a map, Google Maps directions link, or natural-language request.
+7. Generate new road-following routes from a map or Google Maps directions link.
+8. Run recurring weekday location windows without a cloud planning dependency.
 
 The recommended implementation uses:
 
@@ -30,7 +31,8 @@ The recommended implementation uses:
 - GPX **track points** (`trkpt`) for `pymobiledevice3` playback.
 - The original Xcode-compatible GPX **waypoints** (`wpt`) retained as an export/fallback format.
 
-The LLM is optional and belongs in the route-planning layer. It should translate conversational requests into structured route requirements. It must **not invent road geometry or coordinates**. A routing engine such as Google Routes, MapKit, OSRM, or Valhalla should calculate the actual route.
+Recurring schedules use explicit coordinates and wall-clock windows. They must
+not depend on a language model, geocoder, or routing provider.
 
 ---
 
@@ -135,12 +137,12 @@ The original Xcode route uses:
 - Choose travel mode and total duration.
 - Generate both Xcode and `pymobiledevice3` GPX formats.
 
-### Optional LLM phase
+### Recurring schedule phase
 
-- Natural-language route requests.
-- Structured intent extraction.
-- Saved place names such as L1, L2, Home, and Physical Location.
-- Multi-stop routes and requested waiting times.
+- Explicit fixed-coordinate windows.
+- IANA-timezone wall-clock evaluation.
+- Selected-weekday and overnight recurrence.
+- Local persistence and unattended switching.
 
 ### Non-goals for the first implementation
 
@@ -149,7 +151,7 @@ The original Xcode route uses:
 - Multiple phones simultaneously.
 - User accounts or cloud persistence.
 - A general-purpose navigation application.
-- Having the LLM calculate or fabricate route coordinates.
+- Inferring coordinates or schedules from free-form text.
 - Automating the Maps to GPX website.
 - Supporting jailbroken-device tooling.
 
@@ -168,11 +170,11 @@ flowchart LR
     GPX["GPX route library"] --> STATE
     STATE --> UI
 
-    PROMPT["Optional natural-language request"] --> LLM["LLM intent parser"]
-    LLM --> ROUTER["Routing engine"]
     PHYSICAL["Mac physical location"] --> ROUTER
     ROUTER --> GENERATOR["Timed GPX generator"]
     GENERATOR --> GPX
+    UI --> SCHEDULE["Weekly schedule controller"]
+    SCHEDULE --> PROC
 ```
 
 ### Why a Python backend
@@ -260,7 +262,7 @@ For a route without timestamps:
 6. Interpolate the resulting profile into half-second playback points.
 7. Use UTC ISO 8601 timestamps.
 
-Do not ask an LLM to assign coordinates or timing.
+Do not infer scheduled coordinates or timing from free-form text.
 
 ---
 
@@ -652,8 +654,7 @@ Implemented Phase 3 flow:
    only after explicit review.
 
 Do not assume a shared Google Maps URL contains the complete detailed route geometry.
-Named-place geocoding, intermediate stops, and natural-language endpoint
-resolution remain Phase 4 work.
+Named-place geocoding and intermediate stops remain out of scope.
 
 ### Routing-engine choices
 
@@ -857,16 +858,17 @@ Exit criterion: No terminal interaction is needed after prerequisites are runnin
 
 Exit criterion: A user can create, preview, save, and play a new route.
 
-### Phase 4 — LLM route assistant
+### Phase 4 — recurring location schedules
 
-1. Define a strict structured request schema. **Implemented**
-2. Add natural-language input. **Implemented**
-3. Resolve named locations. **Implemented**
-4. Call the routing provider. **Implemented**
-5. Require preview confirmation. **Implemented**
-6. Add privacy settings and provider overrides. **Implemented for local MVP**
+1. Define explicit coordinate and wall-clock window validation. **Implemented**
+2. Add selected-weekday recurrence and overnight windows. **Implemented**
+3. Reject overlapping windows. **Implemented**
+4. Persist and resume an enabled schedule. **Implemented**
+5. Restore real GPS outside active windows. **Implemented**
+6. Keep the Mac awake and reuse static-location recovery. **Implemented**
 
-Exit criterion: Natural-language requests reliably become confirmed, road-following routes.
+Exit criterion: Saved weekly windows switch locations unattended while the
+controller and selected USB device remain connected.
 
 ---
 
