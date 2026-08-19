@@ -157,7 +157,9 @@ def test_controller_applies_clears_persists_and_resumes(tmp_path) -> None:
         assert active["preventingIdleSleep"] is True
         assert set_calls == [(37.38368040757789, -122.13672073499355)]
         saved = json.loads((tmp_path / "schedule.json").read_text())
-        assert saved["enabled"] is True
+        assert saved["version"] == 2
+        assert saved["activeScheduleId"] == active["activeScheduleId"]
+        assert len(saved["schedules"]) == 1
 
         current_time[0] = datetime(2026, 8, 18, 2, 0, tzinfo=timezone.utc)
         deadline = time.monotonic() + 1
@@ -187,6 +189,83 @@ def test_controller_applies_clears_persists_and_resumes(tmp_path) -> None:
         assert stopped["state"] == "disabled"
         assert stopped["enabled"] is False
         assert power_processes[-1].terminated is True
-        assert json.loads((tmp_path / "schedule.json").read_text())["enabled"] is False
+        assert (
+            json.loads((tmp_path / "schedule.json").read_text())[
+                "activeScheduleId"
+            ]
+            is None
+        )
     finally:
         resumed.shutdown()
+
+
+def test_controller_saves_many_schedules_but_activates_only_one(tmp_path) -> None:
+    set_calls = []
+    controller = LocationScheduleController(
+        tmp_path / "schedule.json",
+        set_location=lambda latitude, longitude: set_calls.append(
+            (latitude, longitude)
+        ),
+        clear_location=lambda: None,
+        now=lambda: datetime(2026, 8, 17, 16, 30, tzinfo=timezone.utc),
+        poll_seconds=60,
+        process_factory=lambda arguments, **kwargs: FakeProcess(arguments, **kwargs),
+    )
+    second = json.loads(json.dumps(SCHEDULE))
+    second["name"] = "Alternate week"
+    second["entries"][0]["latitude"] = 40.7128
+    second["entries"][0]["longitude"] = -74.006
+    try:
+        first_status = controller.save_and_start(
+            {"scheduleId": None, "schedule": SCHEDULE}
+        )
+        first_id = first_status["activeScheduleId"]
+        second_status = controller.save(
+            {"scheduleId": None, "schedule": second}
+        )
+        second_id = second_status["scheduleId"]
+
+        assert first_id != second_id
+        assert len(second_status["schedules"]) == 2
+        assert sum(item["active"] for item in second_status["schedules"]) == 1
+        assert second_status["activeScheduleId"] == first_id
+
+        switched = controller.activate_saved(second_id)
+        assert switched["activeScheduleId"] == second_id
+        assert sum(item["active"] for item in switched["schedules"]) == 1
+        assert set_calls[-1] == (40.7128, -74.006)
+        with pytest.raises(ScheduleValidationError, match="Stop the active"):
+            controller.delete_saved(second_id)
+
+        controller.stop(clear_location=False)
+        deleted = controller.delete_saved(first_id)
+        assert [item["id"] for item in deleted["schedules"]] == [second_id]
+    finally:
+        controller.shutdown()
+
+
+def test_controller_migrates_the_single_schedule_store(tmp_path) -> None:
+    store_path = tmp_path / "schedule.json"
+    store_path.write_text(
+        json.dumps({"version": 1, "enabled": False, "schedule": SCHEDULE}),
+        encoding="utf-8",
+    )
+
+    controller = LocationScheduleController(
+        store_path,
+        set_location=lambda latitude, longitude: None,
+        clear_location=lambda: None,
+        poll_seconds=60,
+        process_factory=lambda arguments, **kwargs: FakeProcess(arguments, **kwargs),
+    )
+    try:
+        status = controller.status()
+        migrated = json.loads(store_path.read_text(encoding="utf-8"))
+
+        assert len(status["schedules"]) == 1
+        assert status["schedules"][0]["name"] == SCHEDULE["name"]
+        assert status["activeScheduleId"] is None
+        assert migrated["version"] == 2
+        assert migrated["activeScheduleId"] is None
+    finally:
+        controller.shutdown()

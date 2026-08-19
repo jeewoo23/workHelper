@@ -26,6 +26,26 @@ test("schedule UI explains recurrence and overnight behavior", () => {
   assert.match(stylesSource, /\.schedule-days\s*\{/);
 });
 
+test("schedule coordinates can be selected directly from the map", () => {
+  assert.match(appSource, /data-schedule-map-pick=/);
+  assert.match(appSource, /function toggleScheduleMapPick\(index\)/);
+  assert.match(appSource, /entry\.latitude = point\.lat\.toFixed\(7\)/);
+  assert.match(appSource, /entry\.longitude = point\.lon\.toFixed\(7\)/);
+  assert.match(stylesSource, /\.schedule-map-pick\s*\{/);
+});
+
+test("multiple saved schedules share one active slot", () => {
+  assert.match(appSource, /data-action="schedule-select"/);
+  assert.match(appSource, /data-action="new-schedule"/);
+  assert.match(appSource, /data-action="delete-schedule"/);
+  assert.match(appSource, /data-action="save-schedule"/);
+  assert.match(appSource, /\/api\/schedule\/save/);
+  assert.match(appSource, /scheduleId:\s*draft\.selectedId/);
+  assert.match(appSource, /activeScheduleId/);
+  assert.match(appSource, /make this the only active schedule/);
+  assert.match(stylesSource, /\.schedule-library\s*\{/);
+});
+
 test("LLM itinerary controls are no longer exposed", () => {
   assert.doesNotMatch(appSource, /OPENAI_API_KEY/);
   assert.doesNotMatch(appSource, /\/api\/itineraries\/interpret/);

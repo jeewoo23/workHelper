@@ -140,6 +140,7 @@ The original Xcode route uses:
 ### Recurring schedule phase
 
 - Explicit fixed-coordinate windows.
+- Multiple locally saved definitions with exactly one active schedule.
 - IANA-timezone wall-clock evaluation.
 - Selected-weekday and overnight recurrence.
 - Local persistence and unattended switching.
@@ -450,6 +451,11 @@ POST /api/playback/resume
 POST /api/playback/stop
 POST /api/location/set
 POST /api/location/clear
+POST /api/schedule/activate
+POST /api/schedule/save
+POST /api/schedule/stop
+POST /api/schedules/{scheduleId}/activate
+DELETE /api/schedules/{scheduleId}
 ```
 
 `POST /api/location/set` accepts numeric `latitude` and `longitude` fields,
@@ -866,6 +872,8 @@ Exit criterion: A user can create, preview, save, and play a new route.
 4. Persist and resume an enabled schedule. **Implemented**
 5. Restore real GPS outside active windows. **Implemented**
 6. Keep the Mac awake and reuse static-location recovery. **Implemented**
+7. Save multiple definitions while enforcing one active schedule. **Implemented**
+8. Select window coordinates directly from the map. **Implemented**
 
 Exit criterion: Saved weekly windows switch locations unattended while the
 controller and selected USB device remain connected.

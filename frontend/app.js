@@ -14,6 +14,7 @@ const state = {
     imported: null
   },
   previewRemainingInputFocused: false,
+  controlPanelCollapsed: false,
   backend: {
     available: false,
     apiVersion: 0,
@@ -58,6 +59,9 @@ const state = {
     error: "",
     saving: false,
     dirty: false,
+    pickIndex: null,
+    selectedId: null,
+    savedSchedules: [],
     loadedSignature: "",
     name: "Weekly location schedule",
     timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || "America/Los_Angeles",
@@ -647,7 +651,7 @@ function renderShell() {
         </header>
 
         <div class="mission-content">
-          <div class="operations-grid">
+          <div class="operations-grid${state.controlPanelCollapsed ? " control-panel-collapsed" : ""}">
             <aside class="route-panel panel">
               <header class="panel-header"><span>ROUTE LIBRARY</span><b data-live="route-total">2</b></header>
               <div class="sidebar-accordions">
@@ -732,6 +736,13 @@ function renderShell() {
                 <details class="sidebar-section" data-sidebar-section="location-schedule">
                   <summary><span>LOCATION SCHEDULE</span><b>WEEKLY</b></summary>
                   <div class="sidebar-section-body schedule-editor">
+                    <div class="schedule-library">
+                      <label><span>SAVED SCHEDULE</span><select data-action="schedule-select" aria-label="Select saved schedule"><option value="">New unsaved schedule</option></select></label>
+                      <div class="schedule-library-actions">
+                        <button class="secondary" type="button" data-action="new-schedule">+ NEW</button>
+                        <button class="secondary" type="button" data-action="delete-schedule" disabled>DELETE</button>
+                      </div>
+                    </div>
                     <div class="schedule-context">
                       <label><span>NAME</span><input data-schedule-input="name" type="text" maxlength="120" value="Weekly location schedule"></label>
                       <label><span>TIMEZONE</span><input data-schedule-input="timezone" type="text" maxlength="80" value="${browserTimezone()}"></label>
@@ -743,6 +754,7 @@ function renderShell() {
                       <span data-live="schedule-detail">Each window switches directly to its coordinate at the selected local time.</span>
                     </div>
                     <div class="schedule-actions">
+                      <button class="secondary schedule-save" type="button" data-action="save-schedule">SAVE</button>
                       <button class="secondary schedule-activate" type="button" data-action="activate-schedule">SAVE &amp; ACTIVATE</button>
                       <button class="secondary schedule-stop" type="button" data-action="stop-schedule" disabled>STOP SCHEDULE</button>
                     </div>
@@ -851,10 +863,13 @@ function renderShell() {
               <div class="map-error" data-live="map-error" hidden></div>
             </section>
 
-            <aside class="control-panel panel">
+            <aside class="control-panel panel" id="playback-control-panel">
               <header class="panel-header">
                 <span>PLAYBACK CONTROL</span>
-                <b class="control-state"><i class="status-dot"></i><span data-live="control-state">STANDBY</span></b>
+                <div class="control-panel-header-actions">
+                  <b class="control-state"><i class="status-dot"></i><span data-live="control-state">STANDBY</span></b>
+                  <button class="panel-collapse-button" type="button" data-action="collapse-control-panel" aria-controls="playback-control-panel" aria-expanded="true" title="Collapse playback controls" aria-label="Collapse playback controls">→</button>
+                </div>
               </header>
 
               <section class="control-section">
@@ -897,6 +912,7 @@ function renderShell() {
               </section>
 
             </aside>
+            <button class="control-panel-expand" type="button" data-action="expand-control-panel" aria-controls="playback-control-panel" aria-expanded="false" aria-label="Expand playback controls" title="Expand playback controls" hidden>← PLAYBACK</button>
           </div>
         </div>
       </main>
@@ -906,6 +922,14 @@ function renderShell() {
 }
 
 function bindControls() {
+  document.querySelector('[data-action="collapse-control-panel"]').addEventListener(
+    "click",
+    () => setControlPanelCollapsed(true)
+  );
+  document.querySelector('[data-action="expand-control-panel"]').addEventListener(
+    "click",
+    () => setControlPanelCollapsed(false)
+  );
   document.querySelector('[data-action="device-select"]').addEventListener(
     "change",
     event => selectDevice(event.target.value)
@@ -960,9 +984,25 @@ function bindControls() {
     "click",
     addScheduleWindow
   );
+  document.querySelector('[data-action="schedule-select"]').addEventListener(
+    "change",
+    event => selectSavedSchedule(event.target.value)
+  );
+  document.querySelector('[data-action="new-schedule"]').addEventListener(
+    "click",
+    createNewSchedule
+  );
+  document.querySelector('[data-action="delete-schedule"]').addEventListener(
+    "click",
+    deleteSelectedSchedule
+  );
   document.querySelector('[data-action="activate-schedule"]').addEventListener(
     "click",
     activateLocationSchedule
+  );
+  document.querySelector('[data-action="save-schedule"]').addEventListener(
+    "click",
+    saveInactiveLocationSchedule
   );
   document.querySelector('[data-action="stop-schedule"]').addEventListener(
     "click",
@@ -983,6 +1023,11 @@ function bindControls() {
     updateScheduleDraftFromEvent
   );
   document.querySelector("[data-schedule-entries]").addEventListener("click", event => {
+    const mapButton = event.target.closest("[data-schedule-map-pick]");
+    if (mapButton) {
+      toggleScheduleMapPick(Number(mapButton.dataset.scheduleMapPick));
+      return;
+    }
     const button = event.target.closest("[data-remove-schedule-window]");
     if (button) removeScheduleWindow(Number(button.dataset.removeScheduleWindow));
   });
@@ -1066,6 +1111,33 @@ function bindControls() {
     syncRemainingInput();
   });
   remainingInput.addEventListener("change", updatePreviewDurationFromRemainingInput);
+}
+
+function setControlPanelCollapsed(collapsed) {
+  state.controlPanelCollapsed = collapsed;
+  const grid = document.querySelector(".operations-grid");
+  const collapseButton = document.querySelector(
+    '[data-action="collapse-control-panel"]'
+  );
+  const expandButton = document.querySelector(
+    '[data-action="expand-control-panel"]'
+  );
+  if (!grid || !collapseButton || !expandButton) return;
+
+  grid.classList.toggle("control-panel-collapsed", collapsed);
+  collapseButton.setAttribute("aria-expanded", String(!collapsed));
+  expandButton.setAttribute("aria-expanded", String(!collapsed));
+  expandButton.hidden = !collapsed;
+
+  window.requestAnimationFrame(() => {
+    if (!state.viewer || state.viewer.isDestroyed()) return;
+    if (typeof state.viewer.forceResize === "function") {
+      state.viewer.forceResize();
+    } else if (typeof state.viewer.resize === "function") {
+      state.viewer.resize();
+    }
+    state.viewer.scene.requestRender();
+  });
 }
 
 function openSidebarSection(name) {
@@ -1184,7 +1256,9 @@ function setRouteBuilderPickTarget(target) {
   const nextTarget = state.routeBuilder.pickTarget === target ? null : target;
   if (nextTarget) {
     state.staticLocation.pickMode = false;
+    state.locationSchedule.pickIndex = null;
     updateStaticLocationPanel();
+    updateSchedulePanel();
   }
   state.routeBuilder.pickTarget = nextTarget;
   state.routeBuilder.status = nextTarget ? "picking" : "idle";
@@ -1462,6 +1536,131 @@ const scheduleDayLabels = [
   ["fri", "F"], ["sat", "S"], ["sun", "S"]
 ];
 
+function defaultScheduleDefinition(number = 1) {
+  return {
+    name: number > 1 ? `Weekly location schedule ${number}` : "Weekly location schedule",
+    timezone: browserTimezone(),
+    entries: [
+      {
+        label: "Location 1",
+        days: ["mon", "tue", "wed", "thu", "fri"],
+        start: "09:00",
+        end: "17:00",
+        latitude: "",
+        longitude: ""
+      }
+    ]
+  };
+}
+
+function applyScheduleDefinition(definition, scheduleId, { dirty = false } = {}) {
+  const draft = state.locationSchedule;
+  draft.selectedId = scheduleId || null;
+  draft.name = definition.name || "Weekly location schedule";
+  draft.timezone = definition.timezone || browserTimezone();
+  draft.entries = (definition.entries || []).map(entry => ({
+    label: entry.label || "Location",
+    days: Array.isArray(entry.days) ? [...entry.days] : [],
+    start: entry.start || "09:00",
+    end: entry.end || "17:00",
+    latitude: String(entry.latitude ?? ""),
+    longitude: String(entry.longitude ?? "")
+  }));
+  draft.pickIndex = null;
+  draft.dirty = dirty;
+  draft.error = "";
+  draft.loadedSignature = dirty ? "" : JSON.stringify(definition);
+  const nameInput = document.querySelector('[data-schedule-input="name"]');
+  const timezoneInput = document.querySelector('[data-schedule-input="timezone"]');
+  if (nameInput) nameInput.value = draft.name;
+  if (timezoneInput) timezoneInput.value = draft.timezone;
+  if (state.viewer && !state.viewer.isDestroyed()) {
+    state.viewer.scene.canvas.style.cursor = "";
+  }
+  renderScheduleEntries();
+}
+
+function renderScheduleLibrary() {
+  const draft = state.locationSchedule;
+  const selector = document.querySelector('[data-action="schedule-select"]');
+  const newButton = document.querySelector('[data-action="new-schedule"]');
+  const deleteButton = document.querySelector('[data-action="delete-schedule"]');
+  if (!selector || !newButton || !deleteButton) return;
+  const unsavedOption = draft.selectedId === null
+    ? '<option value="">New unsaved schedule</option>'
+    : "";
+  const savedOptions = draft.savedSchedules.map(schedule => {
+    const active = schedule.id === state.backend.schedule?.activeScheduleId;
+    return `<option value="${escapeHtml(schedule.id)}">${escapeHtml(schedule.name)}${active ? " · ACTIVE" : ""}</option>`;
+  }).join("");
+  const options = unsavedOption + savedOptions;
+  if (selector.innerHTML !== options) selector.innerHTML = options;
+  selector.value = draft.selectedId || "";
+  selector.disabled = draft.saving
+    || (!draft.savedSchedules.length && draft.selectedId === null);
+  newButton.disabled = draft.saving;
+  deleteButton.disabled = draft.saving
+    || draft.selectedId === null
+    || draft.selectedId === state.backend.schedule?.activeScheduleId;
+  deleteButton.title = draft.selectedId === state.backend.schedule?.activeScheduleId
+    ? "Stop this schedule before deleting it"
+    : "Delete selected schedule";
+}
+
+function createNewSchedule() {
+  const draft = state.locationSchedule;
+  if (draft.dirty && !window.confirm("Discard unsaved schedule changes?")) return;
+  applyScheduleDefinition(
+    defaultScheduleDefinition(draft.savedSchedules.length + 1),
+    null,
+    { dirty: true }
+  );
+}
+
+function selectSavedSchedule(scheduleId) {
+  const draft = state.locationSchedule;
+  if (!scheduleId || scheduleId === draft.selectedId) return;
+  const selected = draft.savedSchedules.find(schedule => schedule.id === scheduleId);
+  if (!selected) return;
+  if (draft.dirty && !window.confirm("Discard unsaved schedule changes?")) {
+    renderScheduleLibrary();
+    return;
+  }
+  applyScheduleDefinition(selected, selected.id);
+}
+
+async function deleteSelectedSchedule() {
+  const draft = state.locationSchedule;
+  const scheduleId = draft.selectedId;
+  const selected = draft.savedSchedules.find(schedule => schedule.id === scheduleId);
+  if (!scheduleId || !selected) return;
+  if (scheduleId === state.backend.schedule?.activeScheduleId) {
+    draft.error = "Stop the active schedule before deleting it.";
+    updateSchedulePanel();
+    return;
+  }
+  if (!window.confirm(`Delete “${selected.name}”?`)) return;
+  draft.saving = true;
+  draft.error = "";
+  updateSchedulePanel();
+  try {
+    state.backend.schedule = await apiRequest(
+      `/api/schedules/${encodeURIComponent(scheduleId)}`,
+      { method: "DELETE" }
+    );
+    draft.savedSchedules = state.backend.schedule.schedules || [];
+    draft.selectedId = state.backend.schedule.scheduleId || null;
+    draft.dirty = false;
+    draft.loadedSignature = "";
+    loadScheduleDraftFromBackend(state.backend.schedule);
+  } catch (error) {
+    draft.error = error.message || "The saved schedule could not be deleted.";
+  } finally {
+    draft.saving = false;
+    updateSchedulePanel();
+  }
+}
+
 function renderScheduleEntries() {
   const container = document.querySelector("[data-schedule-entries]");
   if (!container) return;
@@ -1484,6 +1683,7 @@ function renderScheduleEntries() {
         <label><span>LATITUDE</span><input class="mono" inputmode="decimal" data-schedule-index="${index}" data-schedule-field="latitude" value="${escapeHtml(String(entry.latitude))}" placeholder="37.3836804"></label>
         <label><span>LONGITUDE</span><input class="mono" inputmode="decimal" data-schedule-index="${index}" data-schedule-field="longitude" value="${escapeHtml(String(entry.longitude))}" placeholder="-122.1367207"></label>
       </div>
+      <button class="schedule-map-pick${state.locationSchedule.pickIndex === index ? " selected" : ""}" type="button" data-schedule-map-pick="${index}" aria-pressed="${state.locationSchedule.pickIndex === index ? "true" : "false"}">${state.locationSchedule.pickIndex === index ? "CLICK THE MAP…" : "⌖ PICK COORDINATES ON MAP"}</button>
     </section>`).join("");
   updateSchedulePanel();
 }
@@ -1508,6 +1708,32 @@ function updateScheduleDraftFromEvent(event) {
   state.locationSchedule.error = "";
 }
 
+function toggleScheduleMapPick(index) {
+  const draft = state.locationSchedule;
+  if (!draft.entries[index]) return;
+  if (!state.viewer || state.viewer.isDestroyed()) {
+    draft.error = "The map is not available for coordinate selection.";
+    updateSchedulePanel();
+    return;
+  }
+
+  draft.pickIndex = draft.pickIndex === index ? null : index;
+  draft.error = "";
+  if (draft.pickIndex !== null) {
+    state.routeBuilder.pickTarget = null;
+    if (state.routeBuilder.status === "picking") {
+      state.routeBuilder.status = "idle";
+    }
+    state.staticLocation.pickMode = false;
+  }
+  state.viewer.scene.canvas.style.cursor = draft.pickIndex === null
+    ? ""
+    : "crosshair";
+  updateRouteBuilderPanel();
+  updateStaticLocationPanel();
+  updateSchedulePanel();
+}
+
 function addScheduleWindow() {
   const number = state.locationSchedule.entries.length + 1;
   state.locationSchedule.entries.push({
@@ -1525,6 +1751,14 @@ function addScheduleWindow() {
 function removeScheduleWindow(index) {
   if (state.locationSchedule.entries.length <= 1) return;
   state.locationSchedule.entries.splice(index, 1);
+  if (state.locationSchedule.pickIndex === index) {
+    state.locationSchedule.pickIndex = null;
+    if (state.viewer && !state.viewer.isDestroyed()) {
+      state.viewer.scene.canvas.style.cursor = "";
+    }
+  } else if (state.locationSchedule.pickIndex > index) {
+    state.locationSchedule.pickIndex -= 1;
+  }
   state.locationSchedule.dirty = true;
   renderScheduleEntries();
 }
@@ -1561,10 +1795,23 @@ function locationSchedulePayload() {
   };
 }
 
-async function activateLocationSchedule() {
+function activateLocationSchedule() {
+  return saveLocationSchedule({ activate: true });
+}
+
+function saveInactiveLocationSchedule() {
+  return saveLocationSchedule({ activate: false });
+}
+
+async function saveLocationSchedule({ activate }) {
   const draft = state.locationSchedule;
   if (!state.backend.available || !supportsBackendCapability("locationScheduling")) {
     draft.error = "Start or restart the local controller to enable location scheduling.";
+    updateSchedulePanel();
+    return;
+  }
+  if (activate && isDevicePlaybackActive()) {
+    draft.error = "Stop route playback before activating a location schedule.";
     updateSchedulePanel();
     return;
   }
@@ -1573,14 +1820,26 @@ async function activateLocationSchedule() {
     draft.saving = true;
     draft.error = "";
     updateSchedulePanel();
-    state.backend.schedule = await apiRequest("/api/schedule/activate", {
+    state.backend.schedule = await apiRequest(
+      activate ? "/api/schedule/activate" : "/api/schedule/save",
+      {
       method: "POST",
-      body: JSON.stringify(payload)
-    });
+      body: JSON.stringify({
+        scheduleId: draft.selectedId,
+        schedule: payload
+      })
+      }
+    );
+    draft.selectedId = state.backend.schedule.scheduleId;
+    draft.savedSchedules = state.backend.schedule.schedules || [];
     draft.dirty = false;
-    draft.loadedSignature = JSON.stringify(state.backend.schedule.schedule || null);
+    draft.loadedSignature = JSON.stringify(payload);
   } catch (error) {
-    draft.error = error.message || "The schedule could not be activated.";
+    draft.error = error.message || (
+      activate
+        ? "The schedule could not be activated."
+        : "The schedule could not be saved."
+    );
   } finally {
     draft.saving = false;
     updateSchedulePanel();
@@ -1606,27 +1865,33 @@ async function stopLocationSchedule() {
 }
 
 function loadScheduleDraftFromBackend(scheduleStatus) {
-  const definition = scheduleStatus?.schedule;
   const draft = state.locationSchedule;
-  if (!definition || draft.dirty) return;
+  draft.savedSchedules = Array.isArray(scheduleStatus?.schedules)
+    ? scheduleStatus.schedules
+    : [];
+  renderScheduleLibrary();
+  if (draft.dirty) return;
+  const selectedId = (
+    draft.savedSchedules.some(schedule => schedule.id === draft.selectedId)
+      ? draft.selectedId
+      : scheduleStatus?.activeScheduleId
+        || scheduleStatus?.scheduleId
+        || draft.savedSchedules[0]?.id
+        || null
+  );
+  const definition = draft.savedSchedules.find(
+    schedule => schedule.id === selectedId
+  );
+  if (!definition) {
+    if (draft.loadedSignature !== "__empty-schedule-library__") {
+      applyScheduleDefinition(defaultScheduleDefinition(), null);
+      draft.loadedSignature = "__empty-schedule-library__";
+    }
+    return;
+  }
   const signature = JSON.stringify(definition);
-  if (signature === draft.loadedSignature) return;
-  draft.loadedSignature = signature;
-  draft.name = definition.name || "Weekly location schedule";
-  draft.timezone = definition.timezone || browserTimezone();
-  draft.entries = (definition.entries || []).map(entry => ({
-    label: entry.label || "Location",
-    days: Array.isArray(entry.days) ? [...entry.days] : [],
-    start: entry.start || "09:00",
-    end: entry.end || "17:00",
-    latitude: String(entry.latitude ?? ""),
-    longitude: String(entry.longitude ?? "")
-  }));
-  const nameInput = document.querySelector('[data-schedule-input="name"]');
-  const timezoneInput = document.querySelector('[data-schedule-input="timezone"]');
-  if (nameInput) nameInput.value = draft.name;
-  if (timezoneInput) timezoneInput.value = draft.timezone;
-  renderScheduleEntries();
+  if (signature === draft.loadedSignature && selectedId === draft.selectedId) return;
+  applyScheduleDefinition(definition, selectedId);
 }
 
 function scheduleMomentText(value, timezoneName) {
@@ -1643,37 +1908,67 @@ function scheduleMomentText(value, timezoneName) {
 function updateSchedulePanel() {
   const draft = state.locationSchedule;
   const schedule = state.backend.schedule;
+  renderScheduleLibrary();
   const card = document.querySelector('[data-live-card="schedule"]');
+  const saveButton = document.querySelector('[data-action="save-schedule"]');
   const activateButton = document.querySelector('[data-action="activate-schedule"]');
   const stopButton = document.querySelector('[data-action="stop-schedule"]');
   const addButton = document.querySelector('[data-action="add-schedule-window"]');
-  if (!card || !activateButton || !stopButton || !addButton) return;
+  if (!card || !saveButton || !activateButton || !stopButton || !addButton) return;
 
   const enabled = !!schedule?.enabled;
+  const selectedIsActive = draft.selectedId !== null
+    && draft.selectedId === schedule?.activeScheduleId;
   const serverError = schedule?.state === "error" ? schedule.error : "";
   const error = draft.error || serverError;
   card.classList.toggle("ready", enabled && !error);
   card.classList.toggle("error", !!error);
   card.classList.toggle("loading", draft.saving);
-  activateButton.disabled = draft.saving || isDevicePlaybackActive()
+  saveButton.disabled = draft.saving || draft.pickIndex !== null
     || !state.backend.available
     || !supportsBackendCapability("locationScheduling");
-  activateButton.textContent = draft.saving ? "SAVING…" : "SAVE & ACTIVATE";
+  saveButton.textContent = draft.saving ? "SAVING…" : "SAVE";
+  activateButton.disabled = draft.saving || draft.pickIndex !== null
+    || isDevicePlaybackActive()
+    || !state.backend.available
+    || !supportsBackendCapability("locationScheduling");
+  activateButton.textContent = draft.saving
+    ? "SAVING…"
+    : selectedIsActive
+      ? "UPDATE ACTIVE"
+      : "SAVE & ACTIVATE";
   stopButton.disabled = draft.saving || !enabled;
   addButton.disabled = draft.saving || state.locationSchedule.entries.length >= 64;
   document.querySelectorAll(
-    "[data-schedule-input], [data-schedule-field], [data-schedule-day], [data-remove-schedule-window]"
+    "[data-schedule-input], [data-schedule-field], [data-schedule-day], [data-remove-schedule-window], [data-schedule-map-pick]"
   ).forEach(input => {
     input.disabled = draft.saving
       || (input.matches("[data-remove-schedule-window]") && draft.entries.length === 1);
   });
+  document.querySelectorAll("[data-schedule-map-pick]").forEach(button => {
+    const selected = Number(button.dataset.scheduleMapPick) === draft.pickIndex;
+    button.classList.toggle("selected", selected);
+    button.setAttribute("aria-pressed", String(selected));
+    button.textContent = selected
+      ? "CLICK THE MAP…"
+      : "⌖ PICK COORDINATES ON MAP";
+  });
 
   if (draft.saving) {
     setText("schedule-status", "Saving location schedule");
-    setText("schedule-detail", "The controller is validating the windows and applying the current one.");
+    setText("schedule-detail", "The controller is validating and storing the schedule definition.");
   } else if (error) {
     setText("schedule-status", "Schedule needs attention");
     setText("schedule-detail", error);
+  } else if (draft.pickIndex !== null) {
+    setText("schedule-status", `Pick coordinates for Window ${draft.pickIndex + 1}`);
+    setText("schedule-detail", "Click once on the Cesium map to fill this window's latitude and longitude.");
+  } else if (enabled && !selectedIsActive) {
+    const activeSchedule = draft.savedSchedules.find(
+      saved => saved.id === schedule.activeScheduleId
+    );
+    setText("schedule-status", `${activeSchedule?.name || "Another schedule"} remains active`);
+    setText("schedule-detail", `Editing ${draft.name}. Save & Activate will stop the current schedule and make this the only active schedule.`);
   } else if (schedule?.state === "active" && schedule.activeWindow) {
     setText("schedule-status", `${schedule.activeWindow.label} is active`);
     setText(
@@ -1689,6 +1984,13 @@ function updateSchedulePanel() {
   } else if (enabled) {
     setText("schedule-status", "Weekly schedule is active");
     setText("schedule-detail", "The controller is waiting for the next matching location window.");
+  } else if (
+    draft.selectedId !== null
+    && state.backend.available
+    && supportsBackendCapability("locationScheduling")
+  ) {
+    setText("schedule-status", `${draft.name} is saved`);
+    setText("schedule-detail", "This schedule is inactive. Choose Save & Activate when you want it to control the device.");
   } else if (!state.backend.available) {
     setText("schedule-status", "Local backend required");
     setText("schedule-detail", "Start the controller to run repeating location windows.");
@@ -2310,6 +2612,7 @@ function toggleStaticLocationMapPick() {
   state.staticLocation.error = "";
   if (state.staticLocation.pickMode) {
     state.routeBuilder.pickTarget = null;
+    state.locationSchedule.pickIndex = null;
     if (state.routeBuilder.status === "picking") {
       state.routeBuilder.status = "idle";
     }
@@ -2318,6 +2621,7 @@ function toggleStaticLocationMapPick() {
     ? "crosshair"
     : "";
   updateRouteBuilderPanel();
+  updateSchedulePanel();
   updateStaticLocationPanel();
 }
 
@@ -2623,13 +2927,18 @@ function initRouteBuilderMapPicking() {
   state.mapPickHandler.setInputAction(movement => {
     const target = state.routeBuilder.pickTarget;
     const staticPick = state.staticLocation.pickMode;
-    if (!target && !staticPick) return;
+    const schedulePickIndex = state.locationSchedule.pickIndex;
+    const schedulePick = Number.isInteger(schedulePickIndex);
+    if (!target && !staticPick && !schedulePick) return;
     const cartesian = viewer.camera.pickEllipsoid(
       movement.position,
       viewer.scene.globe.ellipsoid
     );
     if (!cartesian) {
-      if (staticPick) {
+      if (schedulePick) {
+        state.locationSchedule.error = "That map position could not be converted to a coordinate.";
+        updateSchedulePanel();
+      } else if (staticPick) {
         state.staticLocation.status = "error";
         state.staticLocation.error = "That map position could not be converted to a coordinate.";
         updateStaticLocationPanel();
@@ -2645,6 +2954,23 @@ function initRouteBuilderMapPicking() {
       lat: Cesium.Math.toDegrees(cartographic.latitude),
       lon: Cesium.Math.toDegrees(cartographic.longitude)
     };
+    if (schedulePick) {
+      const entry = state.locationSchedule.entries[schedulePickIndex];
+      if (!entry) {
+        state.locationSchedule.pickIndex = null;
+        viewer.scene.canvas.style.cursor = "";
+        updateSchedulePanel();
+        return;
+      }
+      entry.latitude = point.lat.toFixed(7);
+      entry.longitude = point.lon.toFixed(7);
+      state.locationSchedule.pickIndex = null;
+      state.locationSchedule.dirty = true;
+      state.locationSchedule.error = "";
+      viewer.scene.canvas.style.cursor = "";
+      renderScheduleEntries();
+      return;
+    }
     if (staticPick) {
       const latitudeInput = document.querySelector(
         '[data-input="static-latitude"]'

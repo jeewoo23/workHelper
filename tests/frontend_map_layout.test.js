@@ -93,3 +93,17 @@ test("desktop layout gives more room to functionality than the map-first layout"
     /grid-template-columns:\s*300px minmax\(340px, 1fr\) 290px/
   );
 });
+
+test("playback rail can collapse into a wider functionality rail", () => {
+  assert.match(appSource, /data-action="collapse-control-panel"/);
+  assert.match(appSource, /data-action="expand-control-panel"/);
+  assert.match(appSource, /function setControlPanelCollapsed\(collapsed\)/);
+  assert.match(stylesSource, /\.operations-grid\.control-panel-collapsed/);
+  assert.match(stylesSource, /grid-template-columns:\s*702px minmax\(400px, 1fr\)/);
+});
+
+test("functionality rails use a larger readable type scale", () => {
+  assert.match(stylesSource, /\.route-panel :is\(input, button, select, textarea\)/);
+  assert.match(stylesSource, /\.control-panel :is\(input, button, select, textarea\)/);
+  assert.match(stylesSource, /font-size:\s*14px/);
+});

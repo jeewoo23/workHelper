@@ -164,12 +164,17 @@ h1, h2, p { margin-top: 0; }
 .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; }
 
 .operations-grid {
+  position: relative;
   display: grid;
   grid-template-columns: 360px minmax(400px, 1fr) 330px;
   gap: 12px;
   height: 100%;
   min-height: 0;
 }
+.operations-grid.control-panel-collapsed {
+  grid-template-columns: 702px minmax(400px, 1fr);
+}
+.operations-grid.control-panel-collapsed .control-panel { display: none; }
 .panel-header {
   display: flex;
   align-items: center;
@@ -562,6 +567,55 @@ h1, h2, p { margin-top: 0; }
   display: grid;
   gap: 7px;
 }
+.schedule-library {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 6px;
+  padding: 8px;
+  background: rgba(67, 162, 216, .055);
+  border: 1px solid rgba(67, 162, 216, .28);
+  border-radius: 6px;
+}
+.schedule-library label {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+.schedule-library label span {
+  color: #75b9dc;
+  font-size: 8px;
+  letter-spacing: .13em;
+}
+.schedule-library select {
+  width: 100%;
+  min-width: 0;
+  min-height: 30px;
+  padding: 4px 24px 4px 7px;
+  overflow: hidden;
+  color: #d1dce5;
+  background: var(--panel-deep);
+  border: 1px solid var(--border-soft);
+  border-radius: 4px;
+  font: 500 9px "IBM Plex Mono", monospace;
+  text-overflow: ellipsis;
+}
+.schedule-library-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 5px;
+  align-self: end;
+}
+.schedule-library-actions button {
+  min-width: 66px;
+  min-height: 30px;
+  padding: 0 7px;
+  color: #9dd8f4;
+  border-color: rgba(67, 162, 216, .4);
+}
+.schedule-library-actions button:last-child {
+  color: #efabab;
+  border-color: rgba(208, 91, 91, .42);
+}
 .schedule-context {
   display: grid;
   grid-template-columns: 1fr 1.25fr;
@@ -662,7 +716,30 @@ h1, h2, p { margin-top: 0; }
   grid-template-columns: 1fr 1fr;
   gap: 5px;
 }
+.schedule-actions {
+  grid-template-columns: .8fr 1.25fr 1.15fr;
+}
+.schedule-map-pick {
+  width: 100%;
+  min-height: 32px;
+  color: #9dd8f4;
+  background: rgba(67, 162, 216, .06);
+  border: 1px solid rgba(67, 162, 216, .4);
+  border-radius: 5px;
+  font: 500 9px "IBM Plex Mono", monospace;
+  letter-spacing: .07em;
+}
+.schedule-map-pick:hover:not(:disabled),
+.schedule-map-pick.selected {
+  color: #e3f7ff;
+  background: rgba(67, 162, 216, .16);
+  border-color: var(--blue);
+}
+.schedule-map-pick.selected {
+  box-shadow: inset 2px 0 0 var(--blue);
+}
 .schedule-add,
+.schedule-save,
 .schedule-activate,
 .schedule-stop {
   min-height: 31px;
@@ -1218,6 +1295,44 @@ h1, h2, p { margin-top: 0; }
 }
 
 .control-panel { display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; }
+.control-panel-header-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.panel-collapse-button,
+.control-panel-expand {
+  color: #9dd8f4;
+  background: rgba(67, 162, 216, .08);
+  border: 1px solid rgba(67, 162, 216, .38);
+  border-radius: 5px;
+  font: 600 14px "IBM Plex Mono", monospace;
+}
+.panel-collapse-button {
+  display: grid;
+  width: 30px;
+  height: 28px;
+  padding: 0;
+  place-items: center;
+}
+.panel-collapse-button:hover,
+.control-panel-expand:hover {
+  color: #e3f7ff;
+  background: rgba(67, 162, 216, .17);
+  border-color: var(--blue);
+}
+.control-panel-expand {
+  position: absolute;
+  z-index: 6;
+  top: 50%;
+  right: 9px;
+  min-height: 36px;
+  padding: 0 11px;
+  font-size: 10px;
+  letter-spacing: .08em;
+  transform: translateY(-50%);
+}
+.control-panel-expand[hidden] { display: none; }
 .control-state { display: flex !important; gap: 6px; align-items: center; color: var(--amber) !important; }
 .control-section { padding: 12px; border-bottom: 1px solid var(--border-soft); }
 .journey-display { display: grid; grid-template-columns: minmax(48px, auto) 1fr minmax(48px, auto); gap: 8px; align-items: center; }
@@ -1340,6 +1455,29 @@ h1, h2, p { margin-top: 0; }
 .segmented button:hover { border-color: var(--dim); }
 .segmented button.selected { color: #9dd8f4; background: var(--blue-soft); border-color: var(--blue); }
 
+/* The side rails carry the app's primary functionality, so keep their type
+   comfortably readable even when the map is visible beside them. */
+.route-panel .panel-header > span,
+.control-panel .panel-header > span,
+.route-panel .sidebar-section summary > span { font-size: 11px; }
+.route-panel .panel-header > b,
+.route-panel .sidebar-section summary > b,
+.control-panel .panel-header b { font-size: 10px; }
+.route-panel :is(input, button, select, textarea),
+.control-panel :is(input, button, select, textarea) { font-size: 11px; }
+.route-panel :is(p, small, em, label > span),
+.control-panel :is(p, small, em, label > span) { font-size: 10px; }
+.route-panel :is(strong, b, code),
+.control-panel :is(strong, b, code) { font-size: 12px; }
+.route-panel .route-copy strong,
+.control-panel .journey-display > strong,
+.control-panel .time-pair strong,
+.control-panel .time-pair input { font-size: 14px; }
+.route-panel .builder-feedback span,
+.route-panel .import-feedback span,
+.route-panel .coordinate-readout > div > span { font-size: 10px; }
+.control-panel .panel-collapse-button { font-size: 14px; }
+
 .loading-state, .fatal-error {
   display: grid;
   min-height: 100vh;
@@ -1358,11 +1496,17 @@ h1, h2, p { margin-top: 0; }
 
 @media (max-width: 1240px) {
   .operations-grid { grid-template-columns: 300px minmax(340px, 1fr) 290px; }
+  .operations-grid.control-panel-collapsed {
+    grid-template-columns: 602px minmax(340px, 1fr);
+  }
   .mission-content { padding-right: 16px; padding-left: 16px; }
 }
 
 @media (max-width: 1040px) {
   .operations-grid { grid-template-columns: 300px minmax(0, 1fr); }
+  .operations-grid.control-panel-collapsed {
+    grid-template-columns: 300px minmax(0, 1fr);
+  }
   .control-panel { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(4, 1fr); }
   .control-panel .panel-header { grid-column: 1 / -1; }
   .control-panel .control-section { border-right: 1px solid var(--border-soft); border-bottom: 0; }

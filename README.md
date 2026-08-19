@@ -225,24 +225,31 @@ details remain available after refresh and are removed with the route.
 
 ## Run a repeating location schedule
 
-Open **Location Schedule** and create one or more location windows. Every window
-contains:
+Open **Location Schedule** and create one or more saved schedules. Use **New**
+to start another definition, **Save** to retain it without changing the active
+schedule, and the saved-schedule menu to switch between definitions.
+Every window in a schedule contains:
 
-- A label and exact latitude/longitude.
+- A label and exact latitude/longitude, entered manually or selected with
+  **Pick Coordinates on Map**.
 - A start and end time in the schedule's IANA timezone.
 - The weekdays on which that window repeats.
 
-Press **Save & Activate**. The controller immediately applies the window that
+Press **Save & Activate**. Only one saved schedule can be active at a time;
+activating another atomically replaces the previous active schedule. The
+controller immediately applies the window that
 contains the current time, switches directly to the next window at its start,
 and restores real GPS when no window is active. There is no interpolated travel
 between scheduled locations. An end time earlier than its start is treated as
 an overnight window whose repeat day is the day it starts. Overlapping windows
 are rejected so the desired coordinate is always unambiguous.
 
-The definition is stored locally in `routes/schedules/location-schedule.json`,
-which is ignored by Git. An enabled schedule resumes automatically when the
-controller restarts. No language model, API key, geocoder, or routing request is
-used by scheduling.
+The schedule library and its single active-schedule identifier are stored
+locally in `routes/schedules/location-schedule.json`, which is ignored by Git.
+Existing single-schedule files migrate automatically. The active schedule
+resumes when the controller restarts; inactive schedules remain saved for later
+selection. No language model, API key, geocoder, or routing request is used by
+scheduling.
 
 The controller holds a macOS `caffeinate` assertion for the entire time a
 schedule is enabled, including gaps between windows. During an active window,
@@ -251,7 +258,8 @@ and reconnects after command or tunnel failures. Keep the controller running,
 the selected iPhone or iPad connected, and the Mac in a lid-open or supported
 clamshell configuration.
 
-Press **Stop Schedule** to disable recurrence and restore real GPS. Starting a
+Press **Stop Schedule** to disable recurrence and restore real GPS. An active
+schedule must be stopped before it can be deleted. Starting a
 route, manually activating a static coordinate, or clearing the location also
 disables the saved schedule so it cannot unexpectedly take control again.
 

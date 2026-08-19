@@ -10,12 +10,15 @@ from dataclasses import dataclass
 from datetime import date, datetime, time as wall_time, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
+from uuid import uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
 MAX_SCHEDULE_ENTRIES = 64
 DAY_NAMES = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 TIME_PATTERN = re.compile(r"^(?:[01]\d|2[0-3]):[0-5]\d$")
+SCHEDULE_ID_PATTERN = re.compile(r"^schedule-[a-f0-9]{12}$")
+LEGACY_SCHEDULE_ID = "schedule-000000000001"
 _UNKNOWN = object()
 
 
@@ -184,7 +187,7 @@ def evaluate_schedule(
 
 
 class LocationScheduleController:
-    """Persist and execute one recurring schedule behind a small interface."""
+    """Persist many recurring schedules while executing at most one."""
 
     def __init__(
         self,
@@ -203,12 +206,14 @@ class LocationScheduleController:
         self._poll_seconds = max(0.05, float(poll_seconds))
         self._process_factory = process_factory
         self._lock = threading.Lock()
+        self._storage_lock = threading.Lock()
         self._operation_lock = threading.Lock()
         self._wake = threading.Event()
         self._shutdown = False
         self._generation = 0
-        self._schedule: Optional[LocationSchedule] = None
-        self._enabled = False
+        self._schedules: dict[str, LocationSchedule] = {}
+        self._selected_schedule_id: Optional[str] = None
+        self._active_schedule_id: Optional[str] = None
         self._applied_key: Any = _UNKNOWN
         self._last_applied_at: Optional[str] = None
         self._error = ""
@@ -223,31 +228,118 @@ class LocationScheduleController:
         self._thread.start()
 
     def save_and_start(self, payload: Any) -> dict[str, Any]:
-        schedule = parse_schedule(payload)
-        self._write(schedule, enabled=True)
-        with self._lock:
-            self._schedule = schedule
-            self._enabled = True
-            self._generation += 1
-            self._applied_key = _UNKNOWN
-            self._error = ""
-            self._ensure_power_assertion_locked()
+        requested_id, schedule, wrapped = _activation_request(payload)
+        with self._storage_lock:
+            with self._lock:
+                schedule_id = requested_id
+                if schedule_id is None and not wrapped:
+                    schedule_id = self._selected_schedule_id
+                if schedule_id is not None and schedule_id not in self._schedules:
+                    raise ScheduleValidationError(
+                        "The selected saved schedule no longer exists"
+                    )
+                if schedule_id is None:
+                    schedule_id = _new_schedule_id(self._schedules)
+                schedules = dict(self._schedules)
+                schedules[schedule_id] = schedule
+            self._write(schedules, active_schedule_id=schedule_id)
+            with self._lock:
+                self._schedules = schedules
+                self._selected_schedule_id = schedule_id
+                self._active_schedule_id = schedule_id
+                self._generation += 1
+                self._applied_key = _UNKNOWN
+                self._error = ""
+                self._ensure_power_assertion_locked()
         self._wake.set()
         self._reconcile_once()
         return self.status()
 
+    def save(self, payload: Any) -> dict[str, Any]:
+        requested_id, schedule, wrapped = _activation_request(payload)
+        reconcile = False
+        with self._storage_lock:
+            with self._lock:
+                schedule_id = requested_id
+                if schedule_id is None and not wrapped:
+                    schedule_id = self._selected_schedule_id
+                if schedule_id is not None and schedule_id not in self._schedules:
+                    raise ScheduleValidationError(
+                        "The selected saved schedule no longer exists"
+                    )
+                if schedule_id is None:
+                    schedule_id = _new_schedule_id(self._schedules)
+                schedules = dict(self._schedules)
+                schedules[schedule_id] = schedule
+                active_id = self._active_schedule_id
+            self._write(schedules, active_schedule_id=active_id)
+            with self._lock:
+                self._schedules = schedules
+                self._selected_schedule_id = schedule_id
+                if schedule_id == active_id:
+                    self._generation += 1
+                    self._applied_key = _UNKNOWN
+                    self._error = ""
+                    reconcile = True
+        if reconcile:
+            self._wake.set()
+            self._reconcile_once()
+        return self.status()
+
+    def activate_saved(self, schedule_id: str) -> dict[str, Any]:
+        schedule_id = _schedule_id(schedule_id)
+        with self._storage_lock:
+            with self._lock:
+                if schedule_id not in self._schedules:
+                    raise ScheduleValidationError("Unknown saved schedule")
+                schedules = dict(self._schedules)
+            self._write(schedules, active_schedule_id=schedule_id)
+            with self._lock:
+                self._selected_schedule_id = schedule_id
+                self._active_schedule_id = schedule_id
+                self._generation += 1
+                self._applied_key = _UNKNOWN
+                self._error = ""
+                self._ensure_power_assertion_locked()
+        self._wake.set()
+        self._reconcile_once()
+        return self.status()
+
+    def delete_saved(self, schedule_id: str) -> dict[str, Any]:
+        schedule_id = _schedule_id(schedule_id)
+        with self._storage_lock:
+            with self._lock:
+                if schedule_id not in self._schedules:
+                    raise ScheduleValidationError("Unknown saved schedule")
+                if schedule_id == self._active_schedule_id:
+                    raise ScheduleValidationError(
+                        "Stop the active schedule before deleting it"
+                    )
+                schedules = dict(self._schedules)
+                del schedules[schedule_id]
+                selected_id = self._selected_schedule_id
+                if selected_id == schedule_id:
+                    selected_id = next(iter(schedules), None)
+                active_id = self._active_schedule_id
+            self._write(schedules, active_schedule_id=active_id)
+            with self._lock:
+                self._schedules = schedules
+                self._selected_schedule_id = selected_id
+        return self.status()
+
     def stop(self, *, clear_location: bool = True) -> dict[str, Any]:
-        with self._lock:
-            schedule = self._schedule
-        if schedule is not None:
-            self._write(schedule, enabled=False)
-        with self._lock:
-            self._enabled = False
-            self._generation += 1
-            self._applied_key = _UNKNOWN
-            self._last_applied_at = None
-            self._error = ""
-            self._stop_power_assertion_locked()
+        with self._storage_lock:
+            with self._lock:
+                schedules = dict(self._schedules)
+            if schedules:
+                self._write(schedules, active_schedule_id=None)
+            with self._lock:
+                self._active_schedule_id = None
+                self._generation += 1
+                self._applied_key = _UNKNOWN
+                self._last_applied_at = None
+                self._error = ""
+                self._stop_power_assertion_locked()
         self._wake.set()
         if clear_location:
             with self._operation_lock:
@@ -267,13 +359,21 @@ class LocationScheduleController:
 
     def status(self) -> dict[str, Any]:
         with self._lock:
-            schedule = self._schedule
-            enabled = self._enabled
+            schedules = dict(self._schedules)
+            selected_schedule_id = self._selected_schedule_id
+            active_schedule_id = self._active_schedule_id
             error = self._error
             last_applied_at = self._last_applied_at
             power_process = self._power_process
             power_warning = self._power_warning
-        moment = evaluate_schedule(schedule, self._now()) if schedule and enabled else None
+        active_schedule = schedules.get(active_schedule_id or "")
+        selected_schedule = schedules.get(selected_schedule_id or "")
+        enabled = active_schedule is not None
+        moment = (
+            evaluate_schedule(active_schedule, self._now())
+            if active_schedule is not None
+            else None
+        )
         active = moment.active if moment else None
         upcoming = moment.next_occurrence if moment else None
         preventing_idle_sleep = (
@@ -291,7 +391,19 @@ class LocationScheduleController:
         payload: dict[str, Any] = {
             "state": state,
             "enabled": enabled,
-            "schedule": schedule_payload(schedule) if schedule else None,
+            "scheduleId": selected_schedule_id,
+            "activeScheduleId": active_schedule_id if enabled else None,
+            "schedule": (
+                schedule_payload(selected_schedule) if selected_schedule else None
+            ),
+            "schedules": [
+                {
+                    "id": schedule_id,
+                    "active": schedule_id == active_schedule_id,
+                    **schedule_payload(saved_schedule),
+                }
+                for schedule_id, saved_schedule in schedules.items()
+            ],
             "activeWindow": _occurrence_payload(active) if active else None,
             "nextWindow": _occurrence_payload(upcoming) if upcoming else None,
             "nextTransitionAt": (
@@ -313,7 +425,7 @@ class LocationScheduleController:
             with self._lock:
                 if self._shutdown:
                     return
-                enabled = self._enabled
+                enabled = self._active_schedule_id in self._schedules
                 if enabled:
                     self._ensure_power_assertion_locked()
             if enabled:
@@ -321,16 +433,16 @@ class LocationScheduleController:
 
     def _reconcile_once(self) -> None:
         with self._lock:
-            if not self._enabled or self._schedule is None or self._shutdown:
+            schedule = self._schedules.get(self._active_schedule_id or "")
+            if schedule is None or self._shutdown:
                 return
-            schedule = self._schedule
             generation = self._generation
         moment = evaluate_schedule(schedule, self._now())
         desired_key: Any = moment.active.key if moment.active else None
         with self._lock:
             if (
                 generation != self._generation
-                or not self._enabled
+                or self._active_schedule_id not in self._schedules
                 or (desired_key == self._applied_key and not self._error)
             ):
                 return
@@ -339,7 +451,7 @@ class LocationScheduleController:
             with self._lock:
                 if (
                     generation != self._generation
-                    or not self._enabled
+                    or self._active_schedule_id not in self._schedules
                     or (desired_key == self._applied_key and not self._error)
                 ):
                     return
@@ -355,7 +467,10 @@ class LocationScheduleController:
                         self._error = str(error)
                 return
             with self._lock:
-                if generation != self._generation or not self._enabled:
+                if (
+                    generation != self._generation
+                    or self._active_schedule_id not in self._schedules
+                ):
                     return
                 self._applied_key = desired_key
                 self._last_applied_at = (
@@ -397,26 +512,39 @@ class LocationScheduleController:
     def _load(self) -> None:
         try:
             raw = json.loads(self._store_path.read_text(encoding="utf-8"))
-            if not isinstance(raw, dict) or set(raw) != {"version", "enabled", "schedule"}:
-                raise ScheduleValidationError("Saved schedule has an invalid format")
-            if raw["version"] != 1 or not isinstance(raw["enabled"], bool):
-                raise ScheduleValidationError("Saved schedule has an unsupported version")
-            schedule = parse_schedule(raw["schedule"])
+            schedules, active_schedule_id, migrated = _parse_schedule_store(raw)
         except FileNotFoundError:
             return
         except (OSError, UnicodeDecodeError, json.JSONDecodeError, ScheduleValidationError) as error:
             self._error = f"Saved schedule could not be loaded: {error}"
             return
-        self._schedule = schedule
-        self._enabled = raw["enabled"]
-        if self._enabled:
+        self._schedules = schedules
+        self._active_schedule_id = active_schedule_id
+        self._selected_schedule_id = active_schedule_id or next(iter(schedules), None)
+        if migrated:
+            try:
+                self._write(schedules, active_schedule_id=active_schedule_id)
+            except ScheduleStorageError as error:
+                self._error = str(error)
+        if self._active_schedule_id is not None:
             self._ensure_power_assertion_locked()
 
-    def _write(self, schedule: LocationSchedule, *, enabled: bool) -> None:
+    def _write(
+        self,
+        schedules: dict[str, LocationSchedule],
+        *,
+        active_schedule_id: Optional[str],
+    ) -> None:
         content = {
-            "version": 1,
-            "enabled": enabled,
-            "schedule": schedule_payload(schedule),
+            "version": 2,
+            "activeScheduleId": active_schedule_id,
+            "schedules": [
+                {
+                    "id": schedule_id,
+                    "schedule": schedule_payload(schedule),
+                }
+                for schedule_id, schedule in schedules.items()
+            ],
         }
         temporary_path = self._store_path.with_name(
             f".{self._store_path.name}.{time.time_ns()}.tmp"
@@ -434,6 +562,68 @@ class LocationScheduleController:
             except OSError:
                 pass
             raise ScheduleStorageError(f"Schedule could not be saved: {error}") from error
+
+
+def _activation_request(
+    payload: Any,
+) -> tuple[Optional[str], LocationSchedule, bool]:
+    if isinstance(payload, dict) and set(payload) == {"scheduleId", "schedule"}:
+        raw_schedule_id = payload["scheduleId"]
+        schedule_id = (
+            None if raw_schedule_id is None else _schedule_id(raw_schedule_id)
+        )
+        return schedule_id, parse_schedule(payload["schedule"]), True
+    return None, parse_schedule(payload), False
+
+
+def _schedule_id(value: Any) -> str:
+    if not isinstance(value, str) or not SCHEDULE_ID_PATTERN.fullmatch(value):
+        raise ScheduleValidationError("Saved schedule identifier is invalid")
+    return value
+
+
+def _new_schedule_id(schedules: dict[str, LocationSchedule]) -> str:
+    while True:
+        candidate = f"schedule-{uuid4().hex[:12]}"
+        if candidate not in schedules:
+            return candidate
+
+
+def _parse_schedule_store(
+    raw: Any,
+) -> tuple[dict[str, LocationSchedule], Optional[str], bool]:
+    if not isinstance(raw, dict):
+        raise ScheduleValidationError("Saved schedule has an invalid format")
+    if set(raw) == {"version", "enabled", "schedule"}:
+        if raw["version"] != 1 or not isinstance(raw["enabled"], bool):
+            raise ScheduleValidationError("Saved schedule has an unsupported version")
+        schedule = parse_schedule(raw["schedule"])
+        return (
+            {LEGACY_SCHEDULE_ID: schedule},
+            LEGACY_SCHEDULE_ID if raw["enabled"] else None,
+            True,
+        )
+    if set(raw) != {"version", "activeScheduleId", "schedules"}:
+        raise ScheduleValidationError("Saved schedule has an invalid format")
+    if raw["version"] != 2 or not isinstance(raw["schedules"], list):
+        raise ScheduleValidationError("Saved schedule has an unsupported version")
+
+    schedules: dict[str, LocationSchedule] = {}
+    for record in raw["schedules"]:
+        if not isinstance(record, dict) or set(record) != {"id", "schedule"}:
+            raise ScheduleValidationError("Saved schedule library has invalid entries")
+        schedule_id = _schedule_id(record["id"])
+        if schedule_id in schedules:
+            raise ScheduleValidationError("Saved schedule identifiers must be unique")
+        schedules[schedule_id] = parse_schedule(record["schedule"])
+
+    raw_active_id = raw["activeScheduleId"]
+    active_schedule_id = (
+        None if raw_active_id is None else _schedule_id(raw_active_id)
+    )
+    if active_schedule_id is not None and active_schedule_id not in schedules:
+        raise ScheduleValidationError("Active schedule is missing from the library")
+    return schedules, active_schedule_id, False
 
 
 def _occurrences_around(

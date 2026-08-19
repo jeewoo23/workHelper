@@ -82,6 +82,7 @@ BACKEND_CAPABILITIES = {
     "directionsGeneration": True,
     "googleMapsLinks": True,
     "locationScheduling": True,
+    "multipleLocationSchedules": True,
     "nullableDuration": True,
     "routeAwareTiming": True,
     "staticLocation": True,
@@ -803,7 +804,7 @@ class RouteRequestHandler(BaseHTTPRequestHandler):
             if parsed.path == "/api/status":
                 self._send_json(
                     {
-                        "apiVersion": 5,
+                        "apiVersion": 6,
                         "capabilities": BACKEND_CAPABILITIES,
                         "device": self.manager.device_status(),
                         "playback": self.manager.status(),
@@ -910,9 +911,52 @@ class RouteRequestHandler(BaseHTTPRequestHandler):
                     ) from error
                 self._send_json(scheduled)
                 return
+            if parsed.path == "/api/schedule/save":
+                controller = self._require_schedule_controller()
+                try:
+                    saved = controller.save(self._read_json_body())
+                except ScheduleValidationError as error:
+                    raise ApiError(
+                        HTTPStatus.BAD_REQUEST,
+                        str(error),
+                        code="invalid_schedule",
+                    ) from error
+                except ScheduleStorageError as error:
+                    raise ApiError(
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        str(error),
+                        code="schedule_write_failed",
+                    ) from error
+                self._send_json(saved)
+                return
             if parsed.path == "/api/schedule/stop":
                 controller = self._require_schedule_controller()
                 self._send_json(controller.stop(clear_location=True))
+                return
+            if (
+                parsed.path.startswith("/api/schedules/")
+                and parsed.path.endswith("/activate")
+            ):
+                controller = self._require_schedule_controller()
+                if self.manager.status().get("state") != "idle":
+                    raise ApiError(
+                        HTTPStatus.CONFLICT,
+                        "Stop route playback before activating a location schedule",
+                        code="playback_active",
+                    )
+                schedule_id = unquote(
+                    parsed.path.removeprefix("/api/schedules/").removesuffix(
+                        "/activate"
+                    )
+                ).strip("/")
+                try:
+                    self._send_json(controller.activate_saved(schedule_id))
+                except ScheduleValidationError as error:
+                    raise ApiError(
+                        HTTPStatus.BAD_REQUEST,
+                        str(error),
+                        code="invalid_schedule",
+                    ) from error
                 return
             if parsed.path == "/api/routes/from-directions":
                 generated = generate_directions_gpx(
@@ -992,6 +1036,27 @@ class RouteRequestHandler(BaseHTTPRequestHandler):
     def do_DELETE(self) -> None:
         try:
             parsed = urlparse(self.path)
+            if parsed.path.startswith("/api/schedules/"):
+                schedule_id = unquote(
+                    parsed.path.removeprefix("/api/schedules/")
+                )
+                try:
+                    deleted = self._require_schedule_controller().delete_saved(
+                        schedule_id
+                    )
+                except ScheduleValidationError as error:
+                    status = (
+                        HTTPStatus.CONFLICT
+                        if "active schedule" in str(error).lower()
+                        else HTTPStatus.BAD_REQUEST
+                    )
+                    raise ApiError(
+                        status,
+                        str(error),
+                        code="schedule_delete_failed",
+                    ) from error
+                self._send_json(deleted)
+                return
             if parsed.path.startswith("/api/routes/imports/"):
                 filename = unquote(
                     parsed.path.removeprefix("/api/routes/imports/")
@@ -1128,7 +1193,10 @@ def _disabled_schedule_status() -> dict[str, Any]:
     return {
         "state": "disabled",
         "enabled": False,
+        "scheduleId": None,
+        "activeScheduleId": None,
         "schedule": None,
+        "schedules": [],
         "activeWindow": None,
         "nextWindow": None,
         "nextTransitionAt": None,

@@ -743,9 +743,30 @@ def test_schedule_endpoint_activates_reports_and_stops(
         activate_response = connection.getresponse()
         activated = json.loads(activate_response.read())
 
+        alternate_request = json.loads(json.dumps(request))
+        alternate_request["name"] = "Alternate week"
+        connection.request(
+            "POST",
+            "/api/schedule/save",
+            body=json.dumps(
+                {"scheduleId": None, "schedule": alternate_request}
+            ),
+            headers={"Content-Type": "application/json"},
+        )
+        save_response = connection.getresponse()
+        saved = json.loads(save_response.read())
+
         connection.request("GET", "/api/status")
         status_response = connection.getresponse()
         status = json.loads(status_response.read())
+
+        active_schedule_id = activated["activeScheduleId"]
+        connection.request(
+            "DELETE",
+            f"/api/schedules/{active_schedule_id}",
+        )
+        active_delete_response = connection.getresponse()
+        active_delete_payload = json.loads(active_delete_response.read())
 
         connection.request(
             "POST",
@@ -755,6 +776,13 @@ def test_schedule_endpoint_activates_reports_and_stops(
         )
         stop_response = connection.getresponse()
         stopped = json.loads(stop_response.read())
+
+        connection.request(
+            "DELETE",
+            f"/api/schedules/{active_schedule_id}",
+        )
+        delete_response = connection.getresponse()
+        deleted = json.loads(delete_response.read())
     finally:
         connection.close()
         server.shutdown()
@@ -765,15 +793,26 @@ def test_schedule_endpoint_activates_reports_and_stops(
     assert activate_response.status == 200
     assert activated["state"] == "active"
     assert activated["activeWindow"]["label"] == "Office"
+    assert save_response.status == 200
+    assert saved["activeScheduleId"] == activated["activeScheduleId"]
+    assert saved["scheduleId"] != saved["activeScheduleId"]
+    assert len(saved["schedules"]) == 2
     assert status_response.status == 200
-    assert status["apiVersion"] == 5
+    assert status["apiVersion"] == 6
     assert status["capabilities"]["locationScheduling"] is True
+    assert status["capabilities"]["multipleLocationSchedules"] is True
     assert "llm" not in status
     assert status["schedule"]["enabled"] is True
+    assert len(status["schedule"]["schedules"]) == 2
+    assert status["schedule"]["activeScheduleId"] is not None
     assert status["simulatedLocation"]["latitude"] == 37.38368040757789
+    assert active_delete_response.status == 409
+    assert active_delete_payload["errorCode"] == "schedule_delete_failed"
     assert stop_response.status == 200
     assert stopped["state"] == "disabled"
     assert stopped["enabled"] is False
+    assert delete_response.status == 200
+    assert len(deleted["schedules"]) == 1
     assert ScheduleHandler.manager.simulated_location() is None
 
 
