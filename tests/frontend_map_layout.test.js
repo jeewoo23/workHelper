@@ -82,3 +82,14 @@ test("the whole left rail owns vertical scrolling", () => {
   assert.ok(sidebarRule, "sidebar accordion styles must exist");
   assert.match(sidebarRule[1], /overflow-y:\s*auto/);
 });
+
+test("desktop layout gives more room to functionality than the map-first layout", () => {
+  assert.match(
+    stylesSource,
+    /grid-template-columns:\s*360px minmax\(400px, 1fr\) 330px/
+  );
+  assert.match(
+    stylesSource,
+    /grid-template-columns:\s*300px minmax\(340px, 1fr\) 290px/
+  );
+});

@@ -165,7 +165,7 @@ h1, h2, p { margin-top: 0; }
 
 .operations-grid {
   display: grid;
-  grid-template-columns: 250px minmax(420px, 1fr) 300px;
+  grid-template-columns: 360px minmax(400px, 1fr) 330px;
   gap: 12px;
   height: 100%;
   min-height: 0;
@@ -1357,12 +1357,12 @@ h1, h2, p { margin-top: 0; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
 @media (max-width: 1240px) {
-  .operations-grid { grid-template-columns: 210px minmax(380px, 1fr) 270px; }
+  .operations-grid { grid-template-columns: 300px minmax(340px, 1fr) 290px; }
   .mission-content { padding-right: 16px; padding-left: 16px; }
 }
 
 @media (max-width: 1040px) {
-  .operations-grid { grid-template-columns: 220px minmax(0, 1fr); }
+  .operations-grid { grid-template-columns: 300px minmax(0, 1fr); }
   .control-panel { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(4, 1fr); }
   .control-panel .panel-header { grid-column: 1 / -1; }
   .control-panel .control-section { border-right: 1px solid var(--border-soft); border-bottom: 0; }
