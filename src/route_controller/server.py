@@ -66,6 +66,9 @@ FRONTEND_DIR = ROOT / "frontend"
 IMPORTS_DIR = ROOT / "routes" / "imports"
 GENERATED_DIR = ROOT / "routes" / "generated"
 SCHEDULE_PATH = ROOT / "routes" / "schedules" / "location-schedule.json"
+STATIC_LOCATION_STATE_PATH = (
+    ROOT / "routes" / "schedules" / "static-location.json"
+)
 MAX_GPX_CONTENT_BYTES = 5 * 1024 * 1024
 MAX_JSON_REQUEST_BYTES = MAX_GPX_CONTENT_BYTES + (1024 * 1024)
 MAX_ROUTE_PREVIEW_POINTS = 8000
@@ -118,6 +121,11 @@ def friendly_device_error(
         )
     if "no usb-connected" in lower or "no device" in lower:
         return f"No USB {noun} was detected. Connect and unlock it, then tap Trust if {os_name} asks."
+    if "password protected" in lower or "device is locked" in lower:
+        return (
+            f"The {noun} is locked. Unlock it once so Work Helper can establish "
+            "the simulated-location session; it may be locked again after the session connects."
+        )
     if "developer mode" in lower:
         return f"Developer Mode is not available on the {noun}. Enable it in Settings and reconnect the device."
     if "developerdiskimage" in lower or "mount" in lower:
@@ -141,12 +149,15 @@ class PlaybackManager:
         static_heartbeat_interval_seconds: float = 300,
         static_watchdog_poll_seconds: float = 5,
         process_startup_grace_seconds: float = 0.25,
+        static_state_path: Optional[Path] = None,
     ) -> None:
         self._lock = Lock()
         self._active: Optional[ActivePlayback] = None
         self._static_process: Optional[subprocess.Popen[str]] = None
         self._static_power_process: Optional[subprocess.Popen[str]] = None
         self._static_power_warning = ""
+        self._static_state_warning = ""
+        self._static_remember = False
         self._static_stop_event: Optional[Event] = None
         self._static_generation = 0
         self._static_last_reasserted_at: Optional[str] = None
@@ -161,6 +172,7 @@ class PlaybackManager:
         self._process_startup_grace_seconds = max(
             0.0, float(process_startup_grace_seconds)
         )
+        self._static_state_path = static_state_path
         self._userspace = userspace
         self._last_error: Optional[dict[str, str]] = None
         self._static_location: Optional[dict[str, float]] = None
@@ -391,6 +403,62 @@ class PlaybackManager:
             self.clear_location()
         return self.status()
 
+    def shutdown(self) -> None:
+        """Stop owned processes while preserving a remembered manual target."""
+        with self._lock:
+            active = self._active
+            if active is not None:
+                self._terminate_process(active.process)
+                self._stop_power_assertion(active)
+                self._active = None
+            self._stop_static_locked(forget_saved=False)
+
+    def forget_saved_static_location(self) -> None:
+        with self._lock:
+            self._delete_static_state_locked()
+
+    def restore_saved_static_location(self) -> Optional[dict[str, Any]]:
+        saved = self._read_static_state()
+        if saved is None:
+            return None
+        target = self._require_target()
+        saved_device_id = saved.get("deviceId")
+        if saved_device_id and saved_device_id != target.identifier:
+            return None
+        latitude = saved["latitude"]
+        longitude = saved["longitude"]
+        self._terminate_saved_orphan(saved, target)
+        with self._lock:
+            self._assert_target_selected_locked(target)
+            if self._active is not None or self._static_location is not None:
+                return self._simulated_location_locked()
+            self._static_device = target
+            self._static_location = {
+                "latitude": latitude,
+                "longitude": longitude,
+            }
+            self._static_remember = True
+            try:
+                self._static_process = self._launch_static_process_locked(
+                    target,
+                    latitude,
+                    longitude,
+                )
+            except ApiError as error:
+                self._static_process = None
+                self._last_error = {
+                    "code": error.code,
+                    "message": error.message,
+                    "detail": error.detail,
+                }
+            else:
+                self._record_static_reassertion_locked()
+                self._last_error = None
+            self._ensure_static_power_assertion_locked()
+            self._start_static_watchdog_locked()
+            self._write_static_state_locked()
+            return self._simulated_location_locked()
+
     def clear_location(self) -> dict[str, Any]:
         try:
             target = self._require_target()
@@ -435,6 +503,8 @@ class PlaybackManager:
         self,
         latitude: float,
         longitude: float,
+        *,
+        remember: bool = True,
     ) -> dict[str, Any]:
         target = self._require_target()
         with self._lock:
@@ -463,20 +533,26 @@ class PlaybackManager:
                 "latitude": latitude,
                 "longitude": longitude,
             }
+            self._static_remember = remember
             self._record_static_reassertion_locked()
             self._ensure_static_power_assertion_locked()
-            self._static_generation += 1
-            generation = self._static_generation
-            stop_event = Event()
-            self._static_stop_event = stop_event
-            Thread(
-                target=self._static_watchdog,
-                args=(generation, stop_event),
-                daemon=True,
-                name="static-location-watchdog",
-            ).start()
+            self._start_static_watchdog_locked()
+            if remember:
+                self._write_static_state_locked()
             self._last_error = None
             return self._simulated_location_locked()
+
+    def _start_static_watchdog_locked(self) -> None:
+        self._static_generation += 1
+        generation = self._static_generation
+        stop_event = Event()
+        self._static_stop_event = stop_event
+        Thread(
+            target=self._static_watchdog,
+            args=(generation, stop_event),
+            daemon=True,
+            name="static-location-watchdog",
+        ).start()
 
     def simulated_location(self) -> Optional[dict[str, Any]]:
         with self._lock:
@@ -545,15 +621,7 @@ class PlaybackManager:
                     return
                 self._reap_static_locked()
                 self._ensure_static_power_assertion_locked()
-                elapsed = (
-                    time.monotonic() - self._static_last_reasserted_monotonic
-                    if self._static_last_reasserted_monotonic is not None
-                    else self._static_heartbeat_interval_seconds
-                )
-                if (
-                    self._static_process is None
-                    or elapsed >= self._static_heartbeat_interval_seconds
-                ):
+                if self._static_process is None:
                     self._reassert_static_location_locked()
 
     def _reassert_static_location_locked(self) -> None:
@@ -577,6 +645,8 @@ class PlaybackManager:
             }
             return
         self._record_static_reassertion_locked()
+        if self._static_remember:
+            self._write_static_state_locked()
         if self._last_error and self._last_error.get("code") == "device_set_failed":
             self._last_error = None
 
@@ -620,12 +690,18 @@ class PlaybackManager:
             **self._static_location,
             "state": "active" if self._static_process is not None else "recovering",
             "heartbeatIntervalSeconds": self._static_heartbeat_interval_seconds,
+            "healthCheckIntervalSeconds": self._static_watchdog_poll_seconds,
+            "sessionMode": "persistent",
             "lastReassertedAt": self._static_last_reasserted_at,
             "reassertionCount": self._static_reassertion_count,
             "preventingIdleSleep": preventing_idle_sleep,
         }
+        if self._last_error and self._last_error.get("code") == "device_set_failed":
+            payload["error"] = self._last_error
         if self._static_power_warning:
             payload["powerWarning"] = self._static_power_warning
+        if self._static_state_warning:
+            payload["stateWarning"] = self._static_state_warning
         return payload
 
     def _reap_static_locked(self) -> None:
@@ -634,21 +710,25 @@ class PlaybackManager:
         returncode = self._static_process.poll()
         if returncode is None:
             return
-        if returncode != 0:
-            raw_error = self._process_stderr(self._static_process)
-            target = self._static_device
-            self._last_error = {
-                "code": "device_set_failed",
-                "message": friendly_device_error(
-                    raw_error or f"Static location exited with code {returncode}",
-                    device_class=target.device_class if target else "device",
-                    os_name=target.os_name if target else "OS",
-                ),
-                "detail": raw_error,
-            }
+        raw_error = self._process_stderr(self._static_process)
+        target = self._static_device
+        exit_detail = raw_error or (
+            "The static-location session ended unexpectedly"
+            if returncode == 0
+            else f"Static location exited with code {returncode}"
+        )
+        self._last_error = {
+            "code": "device_set_failed",
+            "message": friendly_device_error(
+                exit_detail,
+                device_class=target.device_class if target else "device",
+                os_name=target.os_name if target else "OS",
+            ),
+            "detail": exit_detail,
+        }
         self._static_process = None
 
-    def _stop_static_locked(self) -> None:
+    def _stop_static_locked(self, *, forget_saved: bool = True) -> None:
         self._static_generation += 1
         if self._static_stop_event is not None:
             self._static_stop_event.set()
@@ -658,11 +738,97 @@ class PlaybackManager:
         self._static_process = None
         self._static_power_process = None
         self._static_power_warning = ""
+        self._static_state_warning = ""
         self._static_device = None
         self._static_location = None
+        self._static_remember = False
         self._static_last_reasserted_at = None
         self._static_last_reasserted_monotonic = None
         self._static_reassertion_count = 0
+        if forget_saved:
+            self._delete_static_state_locked()
+
+    def _read_static_state(self) -> Optional[dict[str, Any]]:
+        path = self._static_state_path
+        if path is None or not path.is_file():
+            return None
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            latitude, longitude = static_location_coordinates(payload)
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, ApiError):
+            return None
+        return {
+            "deviceId": payload.get("deviceId"),
+            "latitude": latitude,
+            "longitude": longitude,
+            "sessionPid": payload.get("sessionPid"),
+        }
+
+    def _write_static_state_locked(self) -> None:
+        path = self._static_state_path
+        if path is None or self._static_location is None or self._static_device is None:
+            return
+        payload = {
+            "deviceId": self._static_device.identifier,
+            **self._static_location,
+            "sessionPid": self._static_process.pid if self._static_process else None,
+        }
+        temporary = path.with_suffix(path.suffix + ".tmp")
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            temporary.write_text(
+                json.dumps(payload, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            temporary.replace(path)
+            self._static_state_warning = ""
+        except OSError as error:
+            self._static_state_warning = (
+                f"The manual target could not be remembered for restart: {error}"
+            )
+
+    def _delete_static_state_locked(self) -> None:
+        path = self._static_state_path
+        if path is None:
+            return
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as error:
+            self._static_state_warning = (
+                f"The remembered manual target could not be removed: {error}"
+            )
+
+    @staticmethod
+    def _terminate_saved_orphan(
+        saved: dict[str, Any], target: DeviceTarget
+    ) -> None:
+        pid = saved.get("sessionPid")
+        if not isinstance(pid, int) or pid <= 1:
+            return
+        try:
+            inspected = subprocess.run(
+                ["ps", "-p", str(pid), "-o", "ppid=,command="],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=2,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return
+        output = inspected.stdout.strip()
+        if not output:
+            return
+        parent_and_command = output.split(maxsplit=1)
+        if len(parent_and_command) != 2 or parent_and_command[0] != "1":
+            return
+        command = parent_and_command[1]
+        expected = "pymobiledevice3 developer dvt simulate-location set"
+        if expected not in command or target.identifier not in command:
+            return
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except (OSError, ProcessLookupError):
+            return
 
     @staticmethod
     def _terminate_process(
@@ -909,6 +1075,7 @@ class RouteRequestHandler(BaseHTTPRequestHandler):
                         str(error),
                         code="schedule_write_failed",
                     ) from error
+                self.manager.forget_saved_static_location()
                 self._send_json(scheduled)
                 return
             if parsed.path == "/api/schedule/save":
@@ -950,13 +1117,15 @@ class RouteRequestHandler(BaseHTTPRequestHandler):
                     )
                 ).strip("/")
                 try:
-                    self._send_json(controller.activate_saved(schedule_id))
+                    scheduled = controller.activate_saved(schedule_id)
                 except ScheduleValidationError as error:
                     raise ApiError(
                         HTTPStatus.BAD_REQUEST,
                         str(error),
                         code="invalid_schedule",
                     ) from error
+                self.manager.forget_saved_static_location()
+                self._send_json(scheduled)
                 return
             if parsed.path == "/api/routes/from-directions":
                 generated = generate_directions_gpx(
@@ -2159,12 +2328,29 @@ def run_server(host: str = "127.0.0.1", port: int = 8765) -> None:
 
     handler = RouteRequestHandler
     handler.registry = DEFAULT_REGISTRY
-    handler.manager = PlaybackManager(userspace=True, registry=DEFAULT_REGISTRY)
+    handler.manager = PlaybackManager(
+        userspace=True,
+        registry=DEFAULT_REGISTRY,
+        static_state_path=STATIC_LOCATION_STATE_PATH,
+    )
     handler.schedule_controller = LocationScheduleController(
         SCHEDULE_PATH,
-        set_location=handler.manager.set_location,
+        set_location=lambda latitude, longitude: handler.manager.set_location(
+            latitude,
+            longitude,
+            remember=False,
+        ),
         clear_location=handler.manager.clear_location,
     )
+    if handler.schedule_controller.status()["enabled"]:
+        handler.manager.forget_saved_static_location()
+    else:
+        try:
+            handler.manager.restore_saved_static_location()
+        except ApiError:
+            # Keep the remembered target. Normal status polling and a later manual
+            # activation can recover after the device is reconnected or unlocked.
+            pass
     server = ThreadingHTTPServer((host, port), handler)
 
     def stop_server(signum: int, frame: Any) -> None:
@@ -2177,4 +2363,4 @@ def run_server(host: str = "127.0.0.1", port: int = 8765) -> None:
         server.serve_forever()
     finally:
         handler.schedule_controller.shutdown()
-        handler.manager.stop(clear_location=True)
+        handler.manager.shutdown()

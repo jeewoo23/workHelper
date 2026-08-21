@@ -38,8 +38,10 @@ test("multiple saved schedules share one active slot", () => {
   assert.match(appSource, /data-action="schedule-select"/);
   assert.match(appSource, /data-action="new-schedule"/);
   assert.match(appSource, /data-action="delete-schedule"/);
+  assert.match(appSource, /data-action="activate-saved-schedule"/);
   assert.match(appSource, /data-action="save-schedule"/);
   assert.match(appSource, /\/api\/schedule\/save/);
+  assert.match(appSource, /\/api\/schedules\/\$\{encodeURIComponent\(scheduleId\)\}\/activate/);
   assert.match(appSource, /scheduleId:\s*draft\.selectedId/);
   assert.match(appSource, /activeScheduleId/);
   assert.match(appSource, /make this the only active schedule/);

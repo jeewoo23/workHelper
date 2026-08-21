@@ -28,12 +28,13 @@ test("activate sends a validated coordinate to the local controller", () => {
   assert.match(appSource, /Longitude must be between -180 and 180/);
 });
 
-test("static position displays heartbeat and recovery state", () => {
-  assert.match(appSource, /heartbeatIntervalSeconds/);
+test("static position displays persistent-session health and recovery state", () => {
+  assert.match(appSource, /healthCheckIntervalSeconds/);
+  assert.match(appSource, /sessionMode/);
   assert.match(appSource, /lastReassertedAt/);
   assert.match(appSource, /Reconnecting to the device/);
-  assert.match(appSource, /reasserts every/);
-  assert.match(appSource, /watchdog active/);
+  assert.match(appSource, /persistent session/);
+  assert.match(appSource, /simulatedLocation\.error\?\.message/);
 });
 
 test("map selection fills a pending target without activating the phone", () => {

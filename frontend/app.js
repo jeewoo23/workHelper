@@ -739,8 +739,9 @@ function renderShell() {
                     <div class="schedule-library">
                       <label><span>SAVED SCHEDULE</span><select data-action="schedule-select" aria-label="Select saved schedule"><option value="">New unsaved schedule</option></select></label>
                       <div class="schedule-library-actions">
-                        <button class="secondary" type="button" data-action="new-schedule">+ NEW</button>
-                        <button class="secondary" type="button" data-action="delete-schedule" disabled>DELETE</button>
+                        <button class="secondary schedule-library-new" type="button" data-action="new-schedule">+ NEW</button>
+                        <button class="secondary schedule-library-delete" type="button" data-action="delete-schedule" disabled>DELETE</button>
+                        <button class="secondary schedule-library-activate" type="button" data-action="activate-saved-schedule" disabled>ACTIVATE SELECTED</button>
                       </div>
                     </div>
                     <div class="schedule-context">
@@ -995,6 +996,10 @@ function bindControls() {
   document.querySelector('[data-action="delete-schedule"]').addEventListener(
     "click",
     deleteSelectedSchedule
+  );
+  document.querySelector('[data-action="activate-saved-schedule"]').addEventListener(
+    "click",
+    activateSelectedSavedSchedule
   );
   document.querySelector('[data-action="activate-schedule"]').addEventListener(
     "click",
@@ -1585,7 +1590,10 @@ function renderScheduleLibrary() {
   const selector = document.querySelector('[data-action="schedule-select"]');
   const newButton = document.querySelector('[data-action="new-schedule"]');
   const deleteButton = document.querySelector('[data-action="delete-schedule"]');
-  if (!selector || !newButton || !deleteButton) return;
+  const activateButton = document.querySelector(
+    '[data-action="activate-saved-schedule"]'
+  );
+  if (!selector || !newButton || !deleteButton || !activateButton) return;
   const unsavedOption = draft.selectedId === null
     ? '<option value="">New unsaved schedule</option>'
     : "";
@@ -1605,6 +1613,21 @@ function renderScheduleLibrary() {
   deleteButton.title = draft.selectedId === state.backend.schedule?.activeScheduleId
     ? "Stop this schedule before deleting it"
     : "Delete selected schedule";
+  const selectedIsActive = draft.selectedId !== null
+    && draft.selectedId === state.backend.schedule?.activeScheduleId;
+  activateButton.disabled = draft.saving
+    || draft.dirty
+    || draft.selectedId === null
+    || selectedIsActive
+    || isDevicePlaybackActive()
+    || !state.backend.available
+    || !supportsBackendCapability("multipleLocationSchedules");
+  activateButton.textContent = selectedIsActive ? "ACTIVE" : "ACTIVATE SELECTED";
+  activateButton.title = draft.dirty
+    ? "Save your changes before activating this saved schedule"
+    : selectedIsActive
+      ? "This is the active schedule"
+      : "Make this the only active schedule";
 }
 
 function createNewSchedule() {
@@ -1655,6 +1678,44 @@ async function deleteSelectedSchedule() {
     loadScheduleDraftFromBackend(state.backend.schedule);
   } catch (error) {
     draft.error = error.message || "The saved schedule could not be deleted.";
+  } finally {
+    draft.saving = false;
+    updateSchedulePanel();
+  }
+}
+
+async function activateSelectedSavedSchedule() {
+  const draft = state.locationSchedule;
+  const scheduleId = draft.selectedId;
+  if (!scheduleId) {
+    draft.error = "Save this new schedule before activating it.";
+    updateSchedulePanel();
+    return;
+  }
+  if (draft.dirty) {
+    draft.error = "Save your changes before activating this saved schedule.";
+    updateSchedulePanel();
+    return;
+  }
+  if (isDevicePlaybackActive()) {
+    draft.error = "Stop route playback before activating a location schedule.";
+    updateSchedulePanel();
+    return;
+  }
+  draft.saving = true;
+  draft.error = "";
+  updateSchedulePanel();
+  try {
+    state.backend.schedule = await apiRequest(
+      `/api/schedules/${encodeURIComponent(scheduleId)}/activate`,
+      { method: "POST" }
+    );
+    draft.savedSchedules = state.backend.schedule.schedules || [];
+    draft.selectedId = state.backend.schedule.activeScheduleId;
+    draft.loadedSignature = "";
+    loadScheduleDraftFromBackend(state.backend.schedule);
+  } catch (error) {
+    draft.error = error.message || "The saved schedule could not be activated.";
   } finally {
     draft.saving = false;
     updateSchedulePanel();
@@ -2098,12 +2159,15 @@ async function refreshBackendStatus() {
       };
       state.staticLocation.watchdog = {
         heartbeatIntervalSeconds: simulatedLocation.heartbeatIntervalSeconds,
+        healthCheckIntervalSeconds: simulatedLocation.healthCheckIntervalSeconds,
+        sessionMode: simulatedLocation.sessionMode,
         lastReassertedAt: simulatedLocation.lastReassertedAt,
         reassertionCount: simulatedLocation.reassertionCount,
         preventingIdleSleep: simulatedLocation.preventingIdleSleep,
-        powerWarning: simulatedLocation.powerWarning || ""
+        powerWarning: simulatedLocation.powerWarning || "",
+        stateWarning: simulatedLocation.stateWarning || ""
       };
-      state.staticLocation.error = "";
+      state.staticLocation.error = simulatedLocation.error?.message || "";
     } else if (
       !simulatedLocation
       && ["active", "recovering"].includes(state.staticLocation.status)
@@ -2713,10 +2777,13 @@ async function activateStaticLocation() {
     state.staticLocation.error = "";
     state.staticLocation.watchdog = {
       heartbeatIntervalSeconds: activated.heartbeatIntervalSeconds,
+      healthCheckIntervalSeconds: activated.healthCheckIntervalSeconds,
+      sessionMode: activated.sessionMode,
       lastReassertedAt: activated.lastReassertedAt,
       reassertionCount: activated.reassertionCount,
       preventingIdleSleep: activated.preventingIdleSleep,
-      powerWarning: activated.powerWarning || ""
+      powerWarning: activated.powerWarning || "",
+      stateWarning: activated.stateWarning || ""
     };
     state.backend.error = "";
     state.playing = false;
@@ -2766,7 +2833,7 @@ function updateStaticLocationPanel() {
     || !capable
     || !isDeviceControllable();
   card.classList.toggle("active", ["active", "recovering"].includes(status));
-  card.classList.toggle("error", status === "error");
+  card.classList.toggle("error", status === "error" || !!state.staticLocation.error);
   card.classList.toggle(
     "loading",
     activating || state.staticLocation.pickMode
@@ -2793,9 +2860,9 @@ function updateStaticLocationPanel() {
     note = `${coordinateText(state.staticLocation.draftPoint)} selected · press Activate`;
   } else if (["active", "recovering"].includes(status) && state.staticLocation.point) {
     const watchdog = state.staticLocation.watchdog;
-    const intervalMinutes = Math.max(
+    const healthCheckSeconds = Math.max(
       1,
-      Math.round((Number(watchdog?.heartbeatIntervalSeconds) || 300) / 60)
+      Math.round(Number(watchdog?.healthCheckIntervalSeconds) || 5)
     );
     const lastReasserted = watchdog?.lastReassertedAt
       ? new Date(watchdog.lastReassertedAt).toLocaleTimeString([], {
@@ -2808,8 +2875,10 @@ function updateStaticLocationPanel() {
       note = `Reconnecting to the device · last reasserted ${lastReasserted}`;
     } else if (watchdog?.powerWarning) {
       note = `Active at ${coordinateText(state.staticLocation.point)} · ${watchdog.powerWarning}`;
+    } else if (watchdog?.stateWarning) {
+      note = `Active at ${coordinateText(state.staticLocation.point)} · ${watchdog.stateWarning}`;
     } else {
-      note = `Active at ${coordinateText(state.staticLocation.point)} · reasserts every ${intervalMinutes} min · last ${lastReasserted}`;
+      note = `Active at ${coordinateText(state.staticLocation.point)} · persistent session · checked every ${healthCheckSeconds} sec · connected ${lastReasserted}`;
     }
   } else if (!state.backend.available) {
     note = "Start the local controller before activating a position.";
@@ -3492,7 +3561,7 @@ function updateLiveState() {
     : staticActive
       ? state.staticLocation.status === "recovering"
         ? `${deviceClass} static position is reconnecting`
-        : `${deviceClass} fixed at ${coordinateText(state.staticLocation.point)} · watchdog active`
+        : `${deviceClass} fixed at ${coordinateText(state.staticLocation.point)} · persistent session active`
     : importedPreview
       ? preparedImport
         ? deviceOnline

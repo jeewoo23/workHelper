@@ -443,7 +443,7 @@ def test_playback_manager_sets_and_clears_static_location(monkeypatch) -> None:
     assert manager.simulated_location() is None
 
 
-def test_static_location_watchdog_periodically_reasserts_coordinate(
+def test_static_location_watchdog_preserves_healthy_session(
     monkeypatch,
 ) -> None:
     processes = []
@@ -473,17 +473,16 @@ def test_static_location_watchdog_periodically_reasserts_coordinate(
     )
 
     manager.set_location(37.3835546, -122.1371287)
-    deadline = time.monotonic() + 1
-    while len(processes) < 3 and time.monotonic() < deadline:
-        time.sleep(0.01)
+    time.sleep(0.08)
 
     status = manager.simulated_location()
-    assert len(processes) >= 3
-    assert processes[0].terminated is True
-    assert processes[2].arguments == processes[0].arguments
+    assert len(processes) == 2
+    assert processes[0].terminated is False
     assert status is not None
     assert status["state"] == "active"
-    assert status["reassertionCount"] >= 2
+    assert status["sessionMode"] == "persistent"
+    assert status["healthCheckIntervalSeconds"] == 0.01
+    assert status["reassertionCount"] == 1
 
     manager.clear_location()
     process_count = len(processes)
@@ -521,13 +520,16 @@ def test_static_location_watchdog_recovers_after_device_command_exits(
     )
 
     manager.set_location(37.3835546, -122.1371287)
-    processes[0].stderr = StringIO("developer tunnel disconnected")
-    processes[0].returncode = 1
+    processes[0].stderr = StringIO(
+        "ERROR Device is password protected. Please unlock and retry"
+    )
+    processes[0].returncode = 0
 
     recovering = manager.simulated_location()
     assert recovering is not None
     assert recovering["state"] == "recovering"
     assert recovering["latitude"] == 37.3835546
+    assert "iPad is locked" in recovering["error"]["message"]
 
     deadline = time.monotonic() + 1
     while len(processes) < 3 and time.monotonic() < deadline:
@@ -540,6 +542,120 @@ def test_static_location_watchdog_recovers_after_device_command_exits(
     assert recovered["state"] == "active"
     assert recovered["reassertionCount"] == 2
     assert manager.status() == {"state": "idle"}
+    manager.clear_location()
+
+
+def test_manual_static_location_survives_controller_restart(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    processes = []
+
+    def fake_popen(arguments, **kwargs):
+        process = FakeProcess(arguments, **kwargs)
+        processes.append(process)
+        return process
+
+    monkeypatch.setattr(
+        "route_controller.server.resolve_executable",
+        lambda _: "pymobiledevice3",
+    )
+    monkeypatch.setattr("route_controller.server.subprocess.Popen", fake_popen)
+    monkeypatch.setattr(
+        "route_controller.server.subprocess.run",
+        lambda arguments, **kwargs: subprocess.CompletedProcess(
+            arguments, 0, "", ""
+        ),
+    )
+    state_path = tmp_path / "static-location.json"
+    first = PlaybackManager(
+        userspace=True,
+        device_provider=ipad_provider,
+        process_startup_grace_seconds=0,
+        static_state_path=state_path,
+    )
+
+    first.set_location(37.3835546, -122.1371287)
+    saved = json.loads(state_path.read_text(encoding="utf-8"))
+    assert saved["deviceId"] == IPAD.identifier
+    assert saved["sessionPid"] == processes[0].pid
+
+    first.shutdown()
+    assert state_path.is_file()
+    assert processes[0].terminated is True
+
+    restored_manager = PlaybackManager(
+        userspace=True,
+        device_provider=ipad_provider,
+        process_startup_grace_seconds=0,
+        static_state_path=state_path,
+    )
+    restored = restored_manager.restore_saved_static_location()
+
+    assert restored is not None
+    assert restored["state"] == "active"
+    assert restored["latitude"] == 37.3835546
+    assert restored["longitude"] == -122.1371287
+    restored_manager.clear_location()
+    assert not state_path.exists()
+
+
+def test_static_location_restore_terminates_only_remembered_orphan(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    processes = []
+    terminated = []
+    state_path = tmp_path / "static-location.json"
+    state_path.write_text(
+        json.dumps(
+            {
+                "deviceId": IPAD.identifier,
+                "latitude": 37.3835546,
+                "longitude": -122.1371287,
+                "sessionPid": 7777,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def fake_popen(arguments, **kwargs):
+        process = FakeProcess(arguments, **kwargs)
+        processes.append(process)
+        return process
+
+    def fake_run(arguments, **kwargs):
+        if arguments[0] == "ps":
+            command = (
+                "1 /opt/workHelper/pymobiledevice3 developer dvt "
+                "simulate-location set --userspace --udid "
+                f"{IPAD.identifier} -- 37.3835546 -122.1371287\n"
+            )
+            return subprocess.CompletedProcess(arguments, 0, command, "")
+        return subprocess.CompletedProcess(arguments, 0, "", "")
+
+    monkeypatch.setattr(
+        "route_controller.server.resolve_executable",
+        lambda _: "pymobiledevice3",
+    )
+    monkeypatch.setattr("route_controller.server.subprocess.Popen", fake_popen)
+    monkeypatch.setattr("route_controller.server.subprocess.run", fake_run)
+    monkeypatch.setattr(
+        "route_controller.server.os.kill",
+        lambda pid, signum: terminated.append((pid, signum)),
+    )
+    manager = PlaybackManager(
+        userspace=True,
+        device_provider=ipad_provider,
+        process_startup_grace_seconds=0,
+        static_state_path=state_path,
+    )
+
+    restored = manager.restore_saved_static_location()
+
+    assert restored is not None
+    assert restored["state"] == "active"
+    assert terminated == [(7777, signal.SIGTERM)]
     manager.clear_location()
 
 
@@ -824,6 +940,17 @@ def test_friendly_device_error_explains_tunneld_recovery() -> None:
 
     assert "developer tunnel is not running" in message.lower()
     assert "tunneld" in message
+
+
+def test_friendly_device_error_explains_locked_ipad_recovery() -> None:
+    message = friendly_device_error(
+        "ERROR Device is password protected. Please unlock and retry",
+        device_class="iPad",
+        os_name="iPadOS",
+    )
+
+    assert "iPad is locked" in message
+    assert "may be locked again" in message
 
 
 def test_failed_playback_status_keeps_friendly_error(monkeypatch) -> None:

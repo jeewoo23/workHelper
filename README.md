@@ -189,11 +189,19 @@ static location to the selected iPhone or iPad through `pymobiledevice3`.
 Static activation is disabled while a route is playing. Starting a route
 replaces the static position, and **Clear Location** restores real GPS. The
 controller treats the active coordinate as desired state: it reasserts the
-same location every five minutes, automatically retries if the device command
-or developer tunnel drops, and uses a macOS `caffeinate` assertion to prevent
-idle system sleep for the life of the static session. The Coordinates panel
-reports whether the session is active or reconnecting and shows the last
-successful reassertion time.
+same location by keeping one healthy developer session open, checks that
+session every five seconds, automatically reconnects only if the command or
+developer tunnel drops, and uses a macOS `caffeinate` assertion to prevent idle
+system sleep for the life of the static session. Establishing or reconnecting
+requires the device to be unlocked; an already-connected session is not
+replaced merely because the device later locks. The Coordinates panel reports
+whether the session is active or reconnecting and surfaces device-lock errors.
+
+The most recent manual target is stored locally in
+`routes/schedules/static-location.json`, which is ignored by Git. A controller
+restart restores that desired target and retries it when the selected device is
+available. **Clear Location**, route playback, or schedule activation removes
+the remembered manual target.
 
 Keep the controller running and the iPad connected for an overnight session.
 Closing the MacBook lid can still suspend a Mac unless it is in a supported
@@ -253,8 +261,8 @@ scheduling.
 
 The controller holds a macOS `caffeinate` assertion for the entire time a
 schedule is enabled, including gaps between windows. During an active window,
-the normal five-minute static-location watchdog also reasserts the coordinate
-and reconnects after command or tunnel failures. Keep the controller running,
+the persistent static-location watchdog holds the healthy session and
+reconnects after command or tunnel failures. Keep the controller running,
 the selected iPhone or iPad connected, and the Mac in a lid-open or supported
 clamshell configuration.
 

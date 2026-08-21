@@ -569,7 +569,7 @@ h1, h2, p { margin-top: 0; }
 }
 .schedule-library {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr);
   gap: 6px;
   padding: 8px;
   background: rgba(67, 162, 216, .055);
@@ -601,7 +601,7 @@ h1, h2, p { margin-top: 0; }
 }
 .schedule-library-actions {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: .75fr .75fr 1.5fr;
   gap: 5px;
   align-self: end;
 }
@@ -612,9 +612,13 @@ h1, h2, p { margin-top: 0; }
   color: #9dd8f4;
   border-color: rgba(67, 162, 216, .4);
 }
-.schedule-library-actions button:last-child {
+.schedule-library-delete {
   color: #efabab;
   border-color: rgba(208, 91, 91, .42);
+}
+.schedule-library-activate {
+  color: #bde6c8 !important;
+  border-color: rgba(97, 190, 125, .52) !important;
 }
 .schedule-context {
   display: grid;
